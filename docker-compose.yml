@@ -1,0 +1,43 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    pull_policy: always
+    command: start --user root --pass root file:/data/nexus.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surreal-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "surreal", "is-ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    env_file: .env
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - PUBLIC_API_URL=http://localhost:3001
+      - PUBLIC_WS_URL=ws://localhost:3001/ws
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  surreal-data:
