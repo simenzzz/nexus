@@ -1,4 +1,7 @@
 pub mod channels;
+pub mod discovery;
+pub mod health;
 pub mod messages;
 pub mod servers;
+pub mod social;
 pub mod users;

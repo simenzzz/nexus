@@ -1,21 +1,59 @@
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::Json;
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use crate::auth::middleware::AuthUser;
 use crate::error::AppError;
 use crate::models::channel::CreateChannel;
+use crate::AppState;
 
 pub async fn create_channel(
-    Path(_server_id): Path<String>,
-    Json(_input): Json<CreateChannel>,
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(server_id): Path<String>,
+    Json(input): Json<CreateChannel>,
 ) -> Result<Json<Value>, AppError> {
-    // TODO: Insert channel into SurrealDB under the given server
-    Ok(Json(serde_json::json!({ "status": "not implemented" })))
+    // Verify user is the server owner
+    let server = state
+        .repos
+        .servers
+        .find_by_id(&server_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Server not found".into()))?;
+
+    let owner_key = server.owner.key().to_string();
+    if owner_key != claims.sub {
+        return Err(AppError::Forbidden("Only the server owner can create channels".into()));
+    }
+
+    // Validate channel name
+    let name = input.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(AppError::BadRequest(
+            "Channel name must be 1-100 characters".into(),
+        ));
+    }
+
+    let channel = state.repos.channels.create(input, &server_id).await?;
+
+    Ok(Json(json!({ "channel": channel })))
 }
 
 pub async fn get_channels(
-    Path(_server_id): Path<String>,
+    State(state): State<AppState>,
+    AuthUser(claims): AuthUser,
+    Path(server_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    // TODO: List channels for the given server
-    Ok(Json(serde_json::json!({ "status": "not implemented" })))
+    // Verify user is a member of the server
+    if !state.repos.servers.is_member(&server_id, &claims.sub).await? {
+        return Err(AppError::Forbidden("Not a member of this server".into()));
+    }
+
+    let channels = state
+        .repos
+        .channels
+        .list_for_server(&server_id)
+        .await?;
+
+    Ok(Json(json!({ "channels": channels })))
 }
