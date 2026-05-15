@@ -1,34 +1,57 @@
-use std::collections::HashMap;
+use deadpool_redis::Pool;
 
-use crate::models::user::UserStatus;
+use crate::error::AppError;
 
-pub struct PresenceTracker {
-    statuses: HashMap<String, UserStatus>,
+pub async fn set_status(
+    redis: &Pool,
+    user_id: &str,
+    status: &str,
+) -> Result<(), AppError> {
+    let key = format!("presence:{user_id}");
+    let mut conn = redis.get().await?;
+    redis::cmd("SET")
+        .arg(&key)
+        .arg(status)
+        .arg("EX")
+        .arg(300i64) // 5 min TTL, refreshed by heartbeat
+        .query_async::<()>(&mut conn)
+        .await?;
+    Ok(())
 }
 
-impl PresenceTracker {
-    pub fn new() -> Self {
-        Self {
-            statuses: HashMap::new(),
-        }
-    }
+pub async fn set_online_with_ttl(
+    redis: &Pool,
+    user_id: &str,
+    ttl_secs: i64,
+) -> Result<(), AppError> {
+    let key = format!("presence:{user_id}");
+    let mut conn = redis.get().await?;
+    redis::cmd("SET")
+        .arg(&key)
+        .arg("online")
+        .arg("EX")
+        .arg(ttl_secs)
+        .query_async::<()>(&mut conn)
+        .await?;
+    Ok(())
+}
 
-    pub fn set_online(&mut self, user_id: String) {
-        self.statuses.insert(user_id, UserStatus::Online);
-    }
+pub async fn get_status(redis: &Pool, user_id: &str) -> Result<String, AppError> {
+    let key = format!("presence:{user_id}");
+    let mut conn = redis.get().await?;
+    let status: Option<String> = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await?;
+    Ok(status.unwrap_or_else(|| "offline".to_string()))
+}
 
-    pub fn set_offline(&mut self, user_id: String) {
-        self.statuses.insert(user_id, UserStatus::Offline);
-    }
-
-    pub fn get_status(&self, user_id: &str) -> UserStatus {
-        self.statuses
-            .get(user_id)
-            .cloned()
-            .unwrap_or(UserStatus::Offline)
-    }
-
-    pub fn is_online(&self, user_id: &str) -> bool {
-        matches!(self.statuses.get(user_id), Some(UserStatus::Online))
-    }
+pub async fn set_offline(redis: &Pool, user_id: &str) -> Result<(), AppError> {
+    let key = format!("presence:{user_id}");
+    let mut conn = redis.get().await?;
+    redis::cmd("DEL")
+        .arg(&key)
+        .query_async::<()>(&mut conn)
+        .await?;
+    Ok(())
 }
