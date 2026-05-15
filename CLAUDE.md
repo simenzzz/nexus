@@ -3,22 +3,23 @@
 ## Overview
 
 Social media / Discord hybrid built with Rust (Axum) + SvelteKit + SurrealDB.
-See `.claude/roadmaps/nexus.md` for the full phased roadmap.
+See `roadmaps/nexus.md` for the full phased roadmap (Phases 0-4).
 
 ## Tech Stack
 
 - **Backend**: Rust, Axum, Tokio, SurrealDB Rust SDK, Yrs (CRDTs)
 - **Frontend**: SvelteKit, TypeScript
 - **Database**: SurrealDB (graph edges + document storage)
-- **Auth**: JWT (jsonwebtoken crate) + SurrealDB auth scopes
+- **Cache/Ephemeral**: Redis (presence, rate limits, refresh tokens, WS tickets)
+- **Auth**: JWT (jsonwebtoken crate) — dual-token (access 15min + refresh 7d)
 
 ## Project Structure
 
 ```
 server/          # Rust backend (Cargo workspace)
 client/          # SvelteKit frontend
-.claude/
-  roadmaps/      # Phased roadmaps
+roadmaps/        # Phased roadmap (nexus.md — Phases 0-4)
+ProjectDocs/     # Architecture decisions, protocol specs, risk analysis
 ```
 
 ## Rust Conventions
@@ -62,13 +63,8 @@ client/          # SvelteKit frontend
 
 ## WebSocket Conventions
 
-### Message Format
-All WS messages are JSON with a `type` discriminator:
-```json
-{"type": "chat_message", "channel_id": "...", "content": "..."}
-{"type": "typing", "channel_id": "...", "user_id": "..."}
-{"type": "presence", "user_id": "...", "status": "online"}
-```
+### Protocol v1
+All WS messages include `"v": 1` and a `type` discriminator. Server messages include `seq` (per-channel sequence number) and `ts`. See `ProjectDocs/ws-protocol-v1.md` for full spec.
 
 ### Room Actor Pattern
 - Each channel spawns a Tokio task acting as a room actor
@@ -78,7 +74,8 @@ All WS messages are JSON with a `type` discriminator:
 
 ### Reconnection
 - Client implements exponential backoff: 1s, 2s, 4s, 8s, max 30s
-- On reconnect, client sends last known message ID to receive missed messages
+- On reconnect, client sends `resume` with last known seq per channel
+- Server replays missed events or sends `resync` if gap too large
 
 ## Frontend Conventions
 
@@ -116,6 +113,13 @@ cd client && npm install && npm run dev
 - **Target**: 80% coverage minimum
 - **TDD workflow**: write test (RED) → implement (GREEN) → refactor (IMPROVE)
 
+## Architectural Decisions
+
+Key decisions documented in `ProjectDocs/architectural-decisions.md`:
+- **ADR-001**: Full repository trait pattern (handlers use `Arc<dyn XRepo>`, not raw DB)
+- **ADR-002**: Redis from day one (presence, rate limits, refresh tokens, WS tickets)
+- **ADR-003**: WS protocol + Auth + Rate limiting built before business logic
+
 ## Security Checklist
 
 Before any commit:
@@ -123,5 +127,5 @@ Before any commit:
 - [ ] All SurrealQL queries are parameterized
 - [ ] User input validated at handler boundaries
 - [ ] JWT tokens have reasonable expiry
-- [ ] WebSocket connections are authenticated
+- [ ] WebSocket connections authenticated via single-use tickets (not raw JWT)
 - [ ] Rate limiting on all public endpoints
