@@ -1,7 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
-use crate::auth::jwt::{validate_token, Claims};
+use crate::auth::jwt::{validate_access_token, Claims};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -24,7 +24,7 @@ impl FromRequestParts<AppState> for AuthUser {
             .strip_prefix("Bearer ")
             .ok_or_else(|| AppError::Unauthorized("Invalid authorization format".into()))?;
 
-        let claims = validate_token(token, &state.config.jwt_secret)?;
+        let claims = validate_access_token(token, &state.config.jwt_secret)?;
 
         Ok(AuthUser(claims))
     }
