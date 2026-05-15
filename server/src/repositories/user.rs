@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+#[cfg(test)]
+use mockall::automock;
 use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
@@ -42,6 +44,7 @@ pub struct CreateUserDb {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg_attr(test, automock)]
 #[async_trait]
 pub trait UserRepo: Send + Sync {
     async fn create(&self, input: CreateUser, password_hash: String) -> Result<User, AppError>;

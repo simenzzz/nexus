@@ -31,3 +31,35 @@ pub async fn verify_password(password: &str, hash: &str) -> Result<bool, AppErro
     .await
     .map_err(|e| AppError::Internal(format!("Spawn blocking failed: {e}")))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn hash_and_verify_roundtrip() {
+        let hash = hash_password("correct horse battery staple").await.unwrap();
+        assert!(verify_password("correct horse battery staple", &hash)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn wrong_password_fails_verification() {
+        let hash = hash_password("password123").await.unwrap();
+        assert!(!verify_password("password124", &hash).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn each_hash_uses_a_fresh_salt() {
+        let h1 = hash_password("same").await.unwrap();
+        let h2 = hash_password("same").await.unwrap();
+        assert_ne!(h1, h2, "two hashes of the same password must differ (random salt)");
+    }
+
+    #[tokio::test]
+    async fn invalid_hash_format_returns_internal_error() {
+        let result = verify_password("anything", "not-an-argon2-hash").await;
+        assert!(matches!(result, Err(AppError::Internal(_))));
+    }
+}

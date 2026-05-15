@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+#[cfg(test)]
+use mockall::automock;
 use serde::Serialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
@@ -14,6 +16,7 @@ pub struct CreateMessageDb {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg_attr(test, automock)]
 #[async_trait]
 pub trait MessageRepo: Send + Sync {
     async fn create(
@@ -33,7 +36,7 @@ pub trait MessageRepo: Send + Sync {
     async fn list_for_channel(
         &self,
         channel_id: &str,
-        before: Option<&str>,
+        before: Option<String>,
         limit: u32,
     ) -> Result<Vec<Message>, AppError>;
 }
@@ -97,7 +100,7 @@ impl MessageRepo for SurrealMessageRepo {
     async fn list_for_channel(
         &self,
         channel_id: &str,
-        before: Option<&str>,
+        before: Option<String>,
         limit: u32,
     ) -> Result<Vec<Message>, AppError> {
         let query = match before {
@@ -121,7 +124,7 @@ impl MessageRepo for SurrealMessageRepo {
         if let Some(before_id) = before {
             q = q.bind((
                 "before",
-                surrealdb::RecordId::from(("message", before_id)),
+                surrealdb::RecordId::from(("message", before_id.as_str())),
             ));
         }
 

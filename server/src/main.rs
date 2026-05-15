@@ -9,6 +9,7 @@ mod repositories;
 mod validation;
 mod ws;
 
+use axum::extract::FromRef;
 use axum::http::{HeaderValue, Method};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE};
 use axum::middleware::{from_fn, from_fn_with_state};
@@ -36,6 +37,12 @@ pub struct AppState {
     pub room_manager: RoomManager,
     pub user_connections: UserConnectionRegistry,
     pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+}
+
+impl FromRef<AppState> for Repos {
+    fn from_ref(state: &AppState) -> Self {
+        state.repos.clone()
+    }
 }
 
 #[tokio::main]

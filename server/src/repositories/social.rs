@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+#[cfg(test)]
+use mockall::automock;
 use serde::Deserialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
@@ -6,6 +8,7 @@ use surrealdb::engine::remote::ws::Client;
 use crate::error::AppError;
 use crate::models::user::User;
 
+#[cfg_attr(test, automock)]
 #[async_trait]
 pub trait SocialRepo: Send + Sync {
     async fn send_friend_request(&self, from: &str, to: &str) -> Result<(), AppError>;

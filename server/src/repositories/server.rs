@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+#[cfg(test)]
+use mockall::automock;
 use serde::Serialize;
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
@@ -15,6 +17,7 @@ pub struct CreateServerDb {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[cfg_attr(test, automock)]
 #[async_trait]
 pub trait ServerRepo: Send + Sync {
     async fn create(
