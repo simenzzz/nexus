@@ -30,6 +30,16 @@ pub enum WatchCommand {
         to_user: String,
         reply_to: mpsc::Sender<String>,
     },
+    /// Leader-only playback transition. `action` is one of `play | pause |
+    /// seek`. The actor checks the leader rule itself (defense in depth — the
+    /// rate-limit boundary at connection.rs already filters) and re-stamps
+    /// `server_ts` before broadcasting so all followers share one clock.
+    PlaybackControl {
+        from_user: String,
+        action: String,
+        position_ms: i64,
+        reply_to: mpsc::Sender<String>,
+    },
     /// Generic fan-out for messages composed outside the actor (REST handlers,
     /// admin events). Routed to every subscriber except `exclude_user`.
     Broadcast {

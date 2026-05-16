@@ -11,8 +11,8 @@ use crate::auth::ws_ticket;
 use crate::collab::resource::ResourceRef;
 use crate::collab::CollabManager;
 use crate::middleware::rate_limit::{
-    check_rate_limit, collab_subscribe_key, message_send_key, whiteboard_awareness_key,
-    whiteboard_subscribe_key, whiteboard_update_key, RateLimitConfig,
+    check_rate_limit, collab_subscribe_key, message_send_key, watch_playback_control_key,
+    whiteboard_awareness_key, whiteboard_subscribe_key, whiteboard_update_key, RateLimitConfig,
 };
 
 /// Cap on the serialized JSON size of an awareness blob. The blob is held in
@@ -626,6 +626,54 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                                 .send(WatchCommand::TransferLeader {
                                     from_user: user_id.clone(),
                                     to_user: to_user_id,
+                                    reply_to: out_tx.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    ClientMessage::WatchPlayback {
+                        channel_id,
+                        action,
+                        position_ms,
+                        client_ts: _,
+                    } => {
+                        if !watch_subscriptions.contains(&channel_id) {
+                            send_watch_not_subscribed(&out_tx, &channel_id).await;
+                            continue;
+                        }
+                        // Rate cap: 10/sec per user per room. Leader is one
+                        // user so this is a per-leader cap. Defense against
+                        // a runaway client looping seek events.
+                        let rate_key = watch_playback_control_key(&user_id, &channel_id);
+                        if check_rate_limit(
+                            &state.redis,
+                            &RateLimitConfig {
+                                key_prefix: rate_key,
+                                limit: 10,
+                                window_secs: 1,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            let _ = out_tx
+                                .send(
+                                    ServerMessage::WatchError {
+                                        channel_id,
+                                        code: "rate_limited".into(),
+                                        message: "Playback control rate limited".into(),
+                                    }
+                                    .to_json(),
+                                )
+                                .await;
+                            continue;
+                        }
+                        if let Some(room) = state.watch_manager.get_room(&channel_id).await {
+                            let _ = room
+                                .send(WatchCommand::PlaybackControl {
+                                    from_user: user_id.clone(),
+                                    action,
+                                    position_ms,
                                     reply_to: out_tx.clone(),
                                 })
                                 .await;

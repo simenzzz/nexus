@@ -72,6 +72,15 @@ pub enum ClientMessage {
         channel_id: String,
         to_user_id: String,
     },
+    /// Leader-only. `action` is one of "play" | "pause" | "seek". `client_ts`
+    /// is the leader's local timestamp at emit; the server replaces it with
+    /// its own `server_ts` before broadcast.
+    WatchPlayback {
+        channel_id: String,
+        action: String,
+        position_ms: i64,
+        client_ts: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +199,15 @@ pub enum ServerMessage {
         playback: serde_json::Value,
         queue: serde_json::Value,
         viewers: serde_json::Value,
+    },
+    /// Leader-stamped playback transition. Followers apply immediately with
+    /// latency compensation `position_ms + (now - server_ts) * rate`.
+    WatchPlayback {
+        channel_id: String,
+        action: String,
+        position_ms: i64,
+        server_ts: u64,
+        by_user: String,
     },
     /// Periodic authoritative playback heartbeat (5s while not paused) so
     /// followers can correct drift without waiting for a transition.

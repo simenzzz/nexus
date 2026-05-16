@@ -99,3 +99,10 @@ pub fn whiteboard_subscribe_key(user_id: &str) -> String {
 pub fn collab_subscribe_key(user_id: &str) -> String {
     format!("rate:collab:sub:{user_id}")
 }
+
+/// Watch-room playback control (play/pause/seek). Leader-only path —
+/// non-leaders are rejected before they hit this. 10/sec is generous given
+/// each click maps to one event and the leader is a single user per room.
+pub fn watch_playback_control_key(user_id: &str, channel_id: &str) -> String {
+    format!("rate:watch:pb:{user_id}:{channel_id}")
+}

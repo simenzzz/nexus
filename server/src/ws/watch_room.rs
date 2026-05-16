@@ -320,6 +320,49 @@ async fn handle_command(
             state.reap_dead(dead);
             let _ = persist_playback(state, watch_repo).await;
         }
+        WatchCommand::PlaybackControl {
+            from_user,
+            action,
+            position_ms,
+            reply_to,
+        } => {
+            if state.leader_id.as_deref() != Some(from_user.as_str()) {
+                send_error(&reply_to, &state.channel_id, "not_leader",
+                    "Only the leader can control playback");
+                return;
+            }
+            // Validate action whitelist defensively; the protocol carries a
+            // free-form string so junk values can reach us.
+            let (new_paused, valid) = match action.as_str() {
+                "play" => (false, true),
+                "pause" => (true, true),
+                "seek" => (state.playback.paused, true),
+                _ => (state.playback.paused, false),
+            };
+            if !valid {
+                send_error(&reply_to, &state.channel_id, "bad_action",
+                    "action must be play, pause, or seek");
+                return;
+            }
+            // Reject negative positions — common cause is a bad client clock.
+            let clamped = position_ms.max(0);
+            let server_ts = now_ms();
+            state.playback.paused = new_paused;
+            state.playback.position_ms = clamped;
+            state.playback.server_ts = server_ts;
+
+            let msg = ServerMessage::WatchPlayback {
+                channel_id: state.channel_id.clone(),
+                action,
+                position_ms: clamped,
+                server_ts,
+                by_user: from_user,
+            }
+            .to_json();
+            let dead = state.broadcast(msg, None);
+            state.reap_dead(dead);
+            let _ = persist_playback(state, watch_repo).await;
+        }
         WatchCommand::Broadcast {
             message,
             exclude_user,
