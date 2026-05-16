@@ -50,7 +50,8 @@ mod tests {
     use crate::models::message::Message;
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
-        server::MockServerRepo, social::MockSocialRepo, user::MockUserRepo,
+        recommendations::MockRecommendationsRepo, server::MockServerRepo,
+        social::MockSocialRepo, user::MockUserRepo, watch::MockWatchRepo,
         whiteboard::MockWhiteboardRepo,
     };
     use mockall::predicate::eq;
@@ -100,6 +101,8 @@ mod tests {
             social: Arc::new(MockSocialRepo::new()),
             posts: Arc::new(MockPostRepo::new()),
             whiteboards: Arc::new(MockWhiteboardRepo::new()),
+            watch: Arc::new(MockWatchRepo::new()),
+            recommendations: Arc::new(MockRecommendationsRepo::new()),
         }
     }
 

@@ -4,7 +4,7 @@ import { api } from '$lib/api/client';
 export interface Channel {
   id: { id?: string; tb?: string } | null;
   name: string;
-  channel_type: 'text' | 'voice' | 'collab' | 'whiteboard';
+  channel_type: 'text' | 'voice' | 'collab' | 'whiteboard' | 'watch';
   server: { id?: string; tb?: string } | null;
   created_at?: string | null;
 }

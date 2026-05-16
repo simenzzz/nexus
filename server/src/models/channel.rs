@@ -11,7 +11,7 @@ pub struct Channel {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelType {
     Text,
@@ -20,6 +20,9 @@ pub enum ChannelType {
     /// Phase 3 — shared whiteboard channel. Each whiteboard channel has at
     /// most one persistent `whiteboard` record keyed by the channel ID.
     Whiteboard,
+    /// Phase 4 — synchronized watch-together room. Each watch channel maps
+    /// 1:1 to a `watch_room` record keyed by the channel ID.
+    Watch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

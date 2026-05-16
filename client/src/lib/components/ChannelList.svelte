@@ -25,6 +25,8 @@
         return '🔊';
       case 'collab':
         return '✦';
+      case 'watch':
+        return '📺';
       default:
         return '#';
     }
@@ -34,6 +36,9 @@
     const id = getChannelId(channel);
     if (channel.channel_type === 'whiteboard') {
       return `/servers/${serverId}/channels/${id}/whiteboard`;
+    }
+    if (channel.channel_type === 'watch') {
+      return `/servers/${serverId}/channels/${id}/watch`;
     }
     return `/servers/${serverId}/channels/${id}`;
   }

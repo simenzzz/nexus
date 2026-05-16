@@ -1,9 +1,11 @@
 pub mod channel;
 pub mod message;
 pub mod post;
+pub mod recommendations;
 pub mod server;
 pub mod social;
 pub mod user;
+pub mod watch;
 pub mod whiteboard;
 
 use std::sync::Arc;
@@ -20,6 +22,8 @@ pub struct Repos {
     pub social: Arc<dyn social::SocialRepo>,
     pub posts: Arc<dyn post::PostRepo>,
     pub whiteboards: Arc<dyn whiteboard::WhiteboardRepo>,
+    pub watch: Arc<dyn watch::WatchRepo>,
+    pub recommendations: Arc<dyn recommendations::RecommendationsRepo>,
 }
 
 impl Repos {
@@ -31,7 +35,9 @@ impl Repos {
             messages: Arc::new(message::SurrealMessageRepo::new(db.clone())),
             social: Arc::new(social::SurrealSocialRepo::new(db.clone())),
             posts: Arc::new(post::SurrealPostRepo::new(db.clone())),
-            whiteboards: Arc::new(whiteboard::SurrealWhiteboardRepo::new(db)),
+            whiteboards: Arc::new(whiteboard::SurrealWhiteboardRepo::new(db.clone())),
+            watch: Arc::new(watch::SurrealWatchRepo::new(db.clone())),
+            recommendations: Arc::new(recommendations::SurrealRecommendationsRepo::new(db)),
         }
     }
 }

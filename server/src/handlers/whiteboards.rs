@@ -163,7 +163,8 @@ mod tests {
     use crate::models::whiteboard::{Whiteboard, WhiteboardCheckpoint};
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
-        server::MockServerRepo, social::MockSocialRepo, user::MockUserRepo,
+        recommendations::MockRecommendationsRepo, server::MockServerRepo,
+        social::MockSocialRepo, user::MockUserRepo, watch::MockWatchRepo,
         whiteboard::MockWhiteboardRepo,
     };
     use std::sync::Arc;
@@ -212,6 +213,8 @@ mod tests {
             social: Arc::new(MockSocialRepo::new()),
             posts: Arc::new(MockPostRepo::new()),
             whiteboards: Arc::new(whiteboards),
+            watch: Arc::new(MockWatchRepo::new()),
+            recommendations: Arc::new(MockRecommendationsRepo::new()),
         }
     }
 
