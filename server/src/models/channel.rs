@@ -17,6 +17,9 @@ pub enum ChannelType {
     Text,
     Voice,
     Collab,
+    /// Phase 3 — shared whiteboard channel. Each whiteboard channel has at
+    /// most one persistent `whiteboard` record keyed by the channel ID.
+    Whiteboard,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

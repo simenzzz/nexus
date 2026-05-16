@@ -79,3 +79,23 @@ pub fn auth_login_key(ip: &str) -> String {
 pub fn auth_register_key(ip: &str) -> String {
     format!("rate:register:{ip}")
 }
+
+pub fn whiteboard_update_key(user_id: &str, channel_id: &str) -> String {
+    format!("rate:wb:upd:{user_id}:{channel_id}")
+}
+
+pub fn whiteboard_awareness_key(user_id: &str, channel_id: &str) -> String {
+    format!("rate:wb:aw:{user_id}:{channel_id}")
+}
+
+/// Whiteboard subscribe/unsubscribe churn protection — prevents abusing the
+/// (uncached) channel/server membership lookup that runs on every subscribe.
+pub fn whiteboard_subscribe_key(user_id: &str) -> String {
+    format!("rate:wb:sub:{user_id}")
+}
+
+/// Per-resource subscribe key — also rate-limits subscribe churn against a
+/// specific channel.
+pub fn collab_subscribe_key(user_id: &str) -> String {
+    format!("rate:collab:sub:{user_id}")
+}

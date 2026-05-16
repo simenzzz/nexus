@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 
 use crate::auth::middleware::AuthUser;
 use crate::collab::doc::CollabDoc;
+use crate::collab::resource::ResourceRef;
+use crate::collab::CollabManager;
 use crate::error::AppError;
 use crate::repositories::Repos;
 
@@ -106,6 +108,7 @@ pub async fn invite_collaborator(
 
 pub async fn publish_post(
     State(repos): State<Repos>,
+    State(collab): State<CollabManager>,
     AuthUser(claims): AuthUser,
     Path(post_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
@@ -130,6 +133,14 @@ pub async fn publish_post(
     let content = doc.text();
 
     let updated = repos.posts.publish(&post_id, content).await?;
+
+    // Notify any active editors that the room is closing, then drop the
+    // cached session so further `CollabUpdate` messages are rejected
+    // (subscribe will refuse because the post is now `published == true`).
+    let _ = collab
+        .close(&ResourceRef::post(post_id.clone()), "published")
+        .await;
+
     Ok(Json(json!({ "post": updated })))
 }
 
@@ -149,6 +160,7 @@ mod tests {
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
         server::MockServerRepo, social::MockSocialRepo, user::MockUserRepo,
+        whiteboard::MockWhiteboardRepo,
     };
     use mockall::predicate::eq;
     use std::sync::Arc;
@@ -184,7 +196,14 @@ mod tests {
             messages: Arc::new(MockMessageRepo::new()),
             social: Arc::new(MockSocialRepo::new()),
             posts: Arc::new(posts),
+            whiteboards: Arc::new(MockWhiteboardRepo::new()),
         }
+    }
+
+    /// Build a CollabManager backed by a no-op MockPostRepo. Sufficient for
+    /// handler tests where close_post / authz never fire (no live sessions).
+    fn collab() -> CollabManager {
+        CollabManager::new(Arc::new(MockPostRepo::new()))
     }
 
     #[tokio::test]
@@ -237,6 +256,7 @@ mod tests {
 
         let result = publish_post(
             State(repos(posts)),
+            State(collab()),
             AuthUser(claims("not-author")),
             Path("p1".into()),
         )
@@ -253,6 +273,7 @@ mod tests {
 
         let result = publish_post(
             State(repos(posts)),
+            State(collab()),
             AuthUser(claims("u1")),
             Path("p1".into()),
         )
@@ -268,6 +289,7 @@ mod tests {
             messages: Arc::new(MockMessageRepo::new()),
             social: Arc::new(social),
             posts: Arc::new(posts),
+            whiteboards: Arc::new(MockWhiteboardRepo::new()),
         }
     }
 
@@ -453,6 +475,7 @@ mod tests {
 
         let response = publish_post(
             State(repos(posts)),
+            State(collab()),
             AuthUser(claims("u1")),
             Path("p1".into()),
         )

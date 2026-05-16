@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
@@ -8,7 +8,18 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::auth::ws_ticket;
-use crate::middleware::rate_limit::{check_rate_limit, message_send_key, RateLimitConfig};
+use crate::collab::resource::ResourceRef;
+use crate::collab::CollabManager;
+use crate::middleware::rate_limit::{
+    check_rate_limit, collab_subscribe_key, message_send_key, whiteboard_awareness_key,
+    whiteboard_subscribe_key, whiteboard_update_key, RateLimitConfig,
+};
+
+/// Cap on the serialized JSON size of an awareness blob. The blob is held in
+/// memory per session and broadcast to every peer, so an unbounded blob is a
+/// DoS amplification vector independent of the 30/sec rate limit. 4 KB is
+/// enough for a cursor + selection + tool color; oversize blobs are rejected.
+const MAX_AWARENESS_BYTES: usize = 4 * 1024;
 use crate::ws::presence;
 use crate::ws::protocol::{ClientMessage, ServerMessage, SubscriptionLevel};
 use crate::ws::replay;
@@ -116,6 +127,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
 
     // Track subscriptions
     let mut subscriptions: HashMap<String, SubscriptionLevel> = HashMap::new();
+    let mut collab_subscriptions: HashSet<ResourceRef> = HashSet::new();
     let mut last_typing: HashMap<String, std::time::Instant> = HashMap::new();
 
     let heartbeat_timeout = std::time::Duration::from_secs(60);
@@ -416,17 +428,150 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                             }
                         }
                     }
-                    // Phase 2 collab message handling is wired through the
-                    // CollabManager (see crate::collab). The dispatch lives
-                    // there to keep this connection loop focused on chat.
-                    ref m @ (ClientMessage::CollabSubscribe { ref post_id }
-                    | ClientMessage::CollabUnsubscribe { ref post_id }
-                    | ClientMessage::CollabUpdate { ref post_id, .. }
-                    | ClientMessage::AwarenessUpdate { ref post_id, .. }) => {
-                        state
+                    // Phase 2 collab + Phase 3 whiteboard messages: route to
+                    // CollabManager via a typed ResourceRef.
+                    ClientMessage::CollabSubscribe { post_id } => {
+                        // Rate-limit subscribe churn so the (uncached) authz
+                        // path can't be hammered. 10/sec per user is plenty
+                        // for legitimate page navigation.
+                        if check_rate_limit(
+                            &state.redis,
+                            &RateLimitConfig {
+                                key_prefix: collab_subscribe_key(&user_id),
+                                limit: 10,
+                                window_secs: 1,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            continue;
+                        }
+                        let r = ResourceRef::post(post_id);
+                        collab_subscriptions.insert(r.clone());
+                        if let Err(e) = state
                             .collab
-                            .dispatch(post_id.clone(), m.clone(), &user_id, out_tx.clone())
+                            .subscribe(&r, &user_id, out_tx.clone())
+                            .await
+                        {
+                            CollabManager::send_error(&out_tx, &r, "subscribe_failed", &e).await;
+                        }
+                    }
+                    ClientMessage::CollabUnsubscribe { post_id } => {
+                        let r = ResourceRef::post(post_id);
+                        collab_subscriptions.remove(&r);
+                        state.collab.unsubscribe(&r, &user_id).await;
+                    }
+                    ClientMessage::CollabUpdate { post_id, update_b64 } => {
+                        let r = ResourceRef::post(post_id);
+                        if let Err(e) = state
+                            .collab
+                            .apply_update(&r, &user_id, &update_b64)
+                            .await
+                        {
+                            CollabManager::send_error(&out_tx, &r, "update_failed", &e).await;
+                        }
+                    }
+                    ClientMessage::AwarenessUpdate { post_id, state: aw_state } => {
+                        if awareness_too_large(&aw_state) {
+                            continue;
+                        }
+                        let r = ResourceRef::post(post_id);
+                        state.collab.update_awareness(&r, &user_id, aw_state).await;
+                    }
+                    ClientMessage::WhiteboardSubscribe { whiteboard_id } => {
+                        if check_rate_limit(
+                            &state.redis,
+                            &RateLimitConfig {
+                                key_prefix: whiteboard_subscribe_key(&user_id),
+                                limit: 10,
+                                window_secs: 1,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            continue;
+                        }
+                        let r = ResourceRef::whiteboard(whiteboard_id);
+                        collab_subscriptions.insert(r.clone());
+                        if let Err(e) = state
+                            .collab
+                            .subscribe(&r, &user_id, out_tx.clone())
+                            .await
+                        {
+                            CollabManager::send_error(&out_tx, &r, "subscribe_failed", &e).await;
+                        }
+                    }
+                    ClientMessage::WhiteboardUnsubscribe { whiteboard_id } => {
+                        let r = ResourceRef::whiteboard(whiteboard_id);
+                        collab_subscriptions.remove(&r);
+                        state.collab.unsubscribe(&r, &user_id).await;
+                    }
+                    ClientMessage::WhiteboardUpdate {
+                        whiteboard_id,
+                        update_b64,
+                    } => {
+                        let r = ResourceRef::whiteboard(whiteboard_id);
+                        // Rate cap: 30 stroke-updates/sec per user per
+                        // whiteboard. Live drawing must stay smooth; this
+                        // only catches malicious or runaway clients.
+                        let rate_key = whiteboard_update_key(&user_id, &r.id);
+                        if check_rate_limit(
+                            &state.redis,
+                            &RateLimitConfig {
+                                key_prefix: rate_key,
+                                limit: 30,
+                                window_secs: 1,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            CollabManager::send_error(
+                                &out_tx,
+                                &r,
+                                "rate_limited",
+                                "Too many updates",
+                            )
                             .await;
+                            continue;
+                        }
+                        if let Err(e) = state
+                            .collab
+                            .apply_update(&r, &user_id, &update_b64)
+                            .await
+                        {
+                            CollabManager::send_error(&out_tx, &r, "update_failed", &e).await;
+                        }
+                    }
+                    ClientMessage::WhiteboardAwarenessUpdate {
+                        whiteboard_id,
+                        state: aw_state,
+                    } => {
+                        // Size cap independent of rate limit — an awareness
+                        // blob is held per-user in memory and amplified to
+                        // every peer on broadcast, so an unbounded JSON
+                        // payload is a DoS amplifier even at 30/sec.
+                        if awareness_too_large(&aw_state) {
+                            continue;
+                        }
+                        let r = ResourceRef::whiteboard(whiteboard_id);
+                        let rate_key = whiteboard_awareness_key(&user_id, &r.id);
+                        if check_rate_limit(
+                            &state.redis,
+                            &RateLimitConfig {
+                                key_prefix: rate_key,
+                                limit: 30,
+                                window_secs: 1,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            continue;
+                        }
+                        state.collab.update_awareness(&r, &user_id, aw_state).await;
                     }
                 }
             }
@@ -465,9 +610,28 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
         }
     }
 
+    // Tear down any dangling collab/whiteboard subscriptions — without this
+    // the CollabManager session holds a dead `mpsc::Sender` and never evicts.
+    for r in &collab_subscriptions {
+        state.collab.unsubscribe(r, &user_id).await;
+    }
+
     drop(out_tx);
     let _ = writer_handle.await;
     tracing::info!(%user_id, "WebSocket client disconnected");
+}
+
+/// Cheap size guard for awareness payloads. Serializes the JSON and rejects
+/// anything over [`MAX_AWARENESS_BYTES`]. We compare the *serialized* form so
+/// the cap matches what we'd actually hold in memory and broadcast.
+fn awareness_too_large(value: &serde_json::Value) -> bool {
+    // `serde_json::to_string` allocates — for the common-case small blob
+    // this is a few hundred bytes. If it grows we can switch to a streaming
+    // writer that aborts at the cap.
+    match serde_json::to_string(value) {
+        Ok(s) => s.len() > MAX_AWARENESS_BYTES,
+        Err(_) => true, // unserializable → reject
+    }
 }
 
 /// Check if a user has access to a channel by verifying server membership.

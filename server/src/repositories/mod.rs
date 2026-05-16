@@ -4,6 +4,7 @@ pub mod post;
 pub mod server;
 pub mod social;
 pub mod user;
+pub mod whiteboard;
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ pub struct Repos {
     pub messages: Arc<dyn message::MessageRepo>,
     pub social: Arc<dyn social::SocialRepo>,
     pub posts: Arc<dyn post::PostRepo>,
+    pub whiteboards: Arc<dyn whiteboard::WhiteboardRepo>,
 }
 
 impl Repos {
@@ -28,7 +30,8 @@ impl Repos {
             channels: Arc::new(channel::SurrealChannelRepo::new(db.clone())),
             messages: Arc::new(message::SurrealMessageRepo::new(db.clone())),
             social: Arc::new(social::SurrealSocialRepo::new(db.clone())),
-            posts: Arc::new(post::SurrealPostRepo::new(db)),
+            posts: Arc::new(post::SurrealPostRepo::new(db.clone())),
+            whiteboards: Arc::new(whiteboard::SurrealWhiteboardRepo::new(db)),
         }
     }
 }

@@ -45,6 +45,21 @@ pub enum ClientMessage {
         /// through unchanged to other subscribers.
         state: serde_json::Value,
     },
+    // ── Phase 3: shared whiteboard (CRDT canvas) ──
+    WhiteboardSubscribe {
+        whiteboard_id: String,
+    },
+    WhiteboardUnsubscribe {
+        whiteboard_id: String,
+    },
+    WhiteboardUpdate {
+        whiteboard_id: String,
+        update_b64: String,
+    },
+    WhiteboardAwarenessUpdate {
+        whiteboard_id: String,
+        state: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +134,38 @@ pub enum ServerMessage {
         post_id: String,
         code: String,
         message: String,
+    },
+    /// Sent when the server tears down a collab session — currently fires on
+    /// publish so editors can flip to a read-only view.
+    CollabClosed {
+        post_id: String,
+        reason: String,
+    },
+    // ── Phase 3: shared whiteboard ──
+    WhiteboardState {
+        whiteboard_id: String,
+        state_b64: String,
+        state_vector_b64: String,
+    },
+    WhiteboardUpdate {
+        whiteboard_id: String,
+        update_b64: String,
+        from_user: String,
+    },
+    WhiteboardAwarenessState {
+        whiteboard_id: String,
+        users: HashMap<String, serde_json::Value>,
+    },
+    WhiteboardError {
+        whiteboard_id: String,
+        code: String,
+        message: String,
+    },
+    /// Sent when the server tears down a whiteboard session (e.g., checkpoint
+    /// restore). Clients should re-subscribe to fetch fresh state.
+    WhiteboardClosed {
+        whiteboard_id: String,
+        reason: String,
     },
 }
 

@@ -147,6 +147,7 @@ mod tests {
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
         server::MockServerRepo, social::MockSocialRepo, user::MockUserRepo,
+        whiteboard::MockWhiteboardRepo,
     };
     use mockall::predicate::eq;
     use pretty_assertions::assert_eq;
@@ -180,6 +181,7 @@ mod tests {
             messages: Arc::new(MockMessageRepo::new()),
             social: Arc::new(social),
             posts: Arc::new(MockPostRepo::new()),
+            whiteboards: Arc::new(MockWhiteboardRepo::new()),
         }
     }
 

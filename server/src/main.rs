@@ -24,9 +24,14 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
+use collab::post_store::PostStore;
+use collab::resource::{ResourceKind, ResourceStore};
+use collab::whiteboard_store::WhiteboardStore;
 use collab::CollabManager;
 use config::AppConfig;
 use repositories::Repos;
+use std::collections::HashMap;
+use std::sync::Arc;
 use ws::room_manager::RoomManager;
 use ws::user_connections::UserConnectionRegistry;
 
@@ -45,6 +50,12 @@ pub struct AppState {
 impl FromRef<AppState> for Repos {
     fn from_ref(state: &AppState) -> Self {
         state.repos.clone()
+    }
+}
+
+impl FromRef<AppState> for CollabManager {
+    fn from_ref(state: &AppState) -> Self {
+        state.collab.clone()
     }
 }
 
@@ -81,7 +92,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repos = Repos::new(db.clone());
     let room_manager = RoomManager::new();
     let user_connections = UserConnectionRegistry::new();
-    let collab = CollabManager::new(repos.posts.clone());
+
+    // Wire one ResourceStore per CRDT-backed resource kind. The manager
+    // routes incoming WS messages by ResourceRef::kind into the matching
+    // store for authorization + persistence.
+    let mut stores: HashMap<ResourceKind, Arc<dyn ResourceStore>> = HashMap::new();
+    stores.insert(
+        ResourceKind::Post,
+        Arc::new(PostStore::new(repos.posts.clone())),
+    );
+    stores.insert(
+        ResourceKind::Whiteboard,
+        Arc::new(WhiteboardStore::new(
+            repos.whiteboards.clone(),
+            repos.channels.clone(),
+            repos.servers.clone(),
+        )),
+    );
+    let collab = CollabManager::with_stores(
+        stores,
+        collab::SWEEP_INTERVAL,
+        collab::IDLE_TTL,
+    );
 
     let state = AppState {
         config,
@@ -162,6 +194,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/posts/{post_id}/invites",
             post(handlers::posts::invite_collaborator),
+        )
+        // Whiteboard routes (Phase 3 — shared canvas)
+        .route(
+            "/api/channels/{channel_id}/whiteboard",
+            get(handlers::whiteboards::get_whiteboard),
+        )
+        .route(
+            "/api/channels/{channel_id}/whiteboard/checkpoints",
+            get(handlers::whiteboards::list_checkpoints)
+                .post(handlers::whiteboards::create_checkpoint),
+        )
+        .route(
+            "/api/channels/{channel_id}/whiteboard/checkpoints/{checkpoint_id}/restore",
+            post(handlers::whiteboards::restore_checkpoint),
         )
         .layer(from_fn(
             middleware::request_id::request_id_middleware,

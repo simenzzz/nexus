@@ -6,3 +6,4 @@ pub mod posts;
 pub mod servers;
 pub mod social;
 pub mod users;
+pub mod whiteboards;
