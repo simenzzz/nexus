@@ -153,9 +153,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Discovery routes
         .route("/api/discover/servers", get(handlers::discovery::discover_servers))
         // Post routes (Phase 2 — collaborative drafts)
-        .route("/api/posts", post(handlers::posts::create_draft))
+        .route(
+            "/api/posts",
+            get(handlers::posts::list_published).post(handlers::posts::create_draft),
+        )
         .route("/api/posts/{post_id}", get(handlers::posts::get_post))
         .route("/api/posts/{post_id}/publish", post(handlers::posts::publish_post))
+        .route(
+            "/api/posts/{post_id}/invites",
+            post(handlers::posts::invite_collaborator),
+        )
         .layer(from_fn(
             middleware::request_id::request_id_middleware,
         ))

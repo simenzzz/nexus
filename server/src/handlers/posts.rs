@@ -13,6 +13,11 @@ pub struct CreateDraftInput {
     pub title: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InviteInput {
+    pub user_id: String,
+}
+
 pub async fn create_draft(
     State(repos): State<Repos>,
     AuthUser(claims): AuthUser,
@@ -32,18 +37,71 @@ pub async fn create_draft(
 
 pub async fn get_post(
     State(repos): State<Repos>,
-    AuthUser(_claims): AuthUser,
+    AuthUser(claims): AuthUser,
     Path(post_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    // Authorization for collab subscription is enforced at the WS layer;
-    // here we just return the bootstrap snapshot to anyone who can hit the
-    // endpoint. Tighten before public beta.
     let post = repos
         .posts
         .find_by_id(&post_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+
+    // Published posts are public reads (feed surfaces them anyway). Drafts
+    // are only visible to the author and explicitly invited collaborators.
+    if !post.published {
+        let author_key = post.author.key().to_string();
+        let allowed = author_key == claims.sub
+            || repos.posts.is_invited(&post_id, &claims.sub).await?;
+        if !allowed {
+            return Err(AppError::Forbidden("Not authorized to view this draft".into()));
+        }
+    }
     Ok(Json(json!({ "post": post })))
+}
+
+pub async fn invite_collaborator(
+    State(repos): State<Repos>,
+    AuthUser(claims): AuthUser,
+    Path(post_id): Path<String>,
+    Json(input): Json<InviteInput>,
+) -> Result<Json<Value>, AppError> {
+    let post = repos
+        .posts
+        .find_by_id(&post_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+
+    let author_key = post.author.key().to_string();
+    if author_key != claims.sub {
+        return Err(AppError::Forbidden(
+            "Only the author can invite collaborators".into(),
+        ));
+    }
+    if post.published {
+        return Err(AppError::BadRequest(
+            "Cannot invite collaborators to a published post".into(),
+        ));
+    }
+    let invitee = input.user_id.trim();
+    if invitee.is_empty() {
+        return Err(AppError::BadRequest("user_id is required".into()));
+    }
+    if invitee == claims.sub {
+        return Err(AppError::BadRequest(
+            "Author is already a collaborator".into(),
+        ));
+    }
+    // Roadmap §2.2 — eligibility is determined by the social graph. Today
+    // that's accepted friends; server-membership eligibility will be added
+    // when posts gain a server scope.
+    let are_friends = repos.social.are_friends(&claims.sub, invitee).await?;
+    if !are_friends {
+        return Err(AppError::Forbidden(
+            "Can only invite accepted friends as collaborators".into(),
+        ));
+    }
+    repos.posts.add_invite(&post_id, invitee).await?;
+    Ok(Json(json!({ "ok": true, "post_id": post_id, "user_id": invitee })))
 }
 
 pub async fn publish_post(
@@ -73,6 +131,14 @@ pub async fn publish_post(
 
     let updated = repos.posts.publish(&post_id, content).await?;
     Ok(Json(json!({ "post": updated })))
+}
+
+pub async fn list_published(
+    State(repos): State<Repos>,
+    AuthUser(_claims): AuthUser,
+) -> Result<Json<Value>, AppError> {
+    let posts = repos.posts.list_published(50).await?;
+    Ok(Json(json!({ "posts": posts })))
 }
 
 #[cfg(test)]
@@ -192,6 +258,186 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    fn repos_with(posts: MockPostRepo, social: MockSocialRepo) -> Repos {
+        Repos {
+            users: Arc::new(MockUserRepo::new()),
+            servers: Arc::new(MockServerRepo::new()),
+            channels: Arc::new(MockChannelRepo::new()),
+            messages: Arc::new(MockMessageRepo::new()),
+            social: Arc::new(social),
+            posts: Arc::new(posts),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_post_allows_author_on_draft() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "u1", false))));
+        // is_invited must not be called when the user is the author
+        posts.expect_is_invited().never();
+
+        let response = get_post(
+            State(repos(posts)),
+            AuthUser(claims("u1")),
+            Path("p1".into()),
+        )
+        .await
+        .expect("author should be allowed");
+        assert!(response.0.get("post").is_some());
+    }
+
+    #[tokio::test]
+    async fn get_post_blocks_non_collaborator_on_draft() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "author", false))));
+        posts.expect_is_invited().returning(|_, _| Ok(false));
+
+        let result = get_post(
+            State(repos(posts)),
+            AuthUser(claims("stranger")),
+            Path("p1".into()),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn get_post_allows_invited_collaborator_on_draft() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "author", false))));
+        posts.expect_is_invited().returning(|_, _| Ok(true));
+
+        let response = get_post(
+            State(repos(posts)),
+            AuthUser(claims("collab")),
+            Path("p1".into()),
+        )
+        .await
+        .expect("invited collaborator should be allowed");
+        assert!(response.0.get("post").is_some());
+    }
+
+    #[tokio::test]
+    async fn get_post_public_for_published() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "author", true))));
+        posts.expect_is_invited().never();
+
+        let response = get_post(
+            State(repos(posts)),
+            AuthUser(claims("stranger")),
+            Path("p1".into()),
+        )
+        .await
+        .expect("published posts should be public");
+        assert!(response.0.get("post").is_some());
+    }
+
+    #[tokio::test]
+    async fn invite_rejects_non_author() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "author", false))));
+
+        let result = invite_collaborator(
+            State(repos(posts)),
+            AuthUser(claims("not-author")),
+            Path("p1".into()),
+            Json(InviteInput { user_id: "friend".into() }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn invite_rejects_published_post() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "u1", true))));
+
+        let result = invite_collaborator(
+            State(repos(posts)),
+            AuthUser(claims("u1")),
+            Path("p1".into()),
+            Json(InviteInput { user_id: "friend".into() }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn invite_rejects_self_invite() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "u1", false))));
+
+        let result = invite_collaborator(
+            State(repos(posts)),
+            AuthUser(claims("u1")),
+            Path("p1".into()),
+            Json(InviteInput { user_id: "u1".into() }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn invite_rejects_non_friend() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "u1", false))));
+        let mut social = MockSocialRepo::new();
+        social.expect_are_friends().returning(|_, _| Ok(false));
+
+        let result = invite_collaborator(
+            State(repos_with(posts, social)),
+            AuthUser(claims("u1")),
+            Path("p1".into()),
+            Json(InviteInput { user_id: "stranger".into() }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn invite_succeeds_for_friend() {
+        let mut posts = MockPostRepo::new();
+        posts
+            .expect_find_by_id()
+            .returning(|_| Ok(Some(post("p1", "u1", false))));
+        posts
+            .expect_add_invite()
+            .with(eq("p1"), eq("friend"))
+            .returning(|_, _| Ok(()));
+        let mut social = MockSocialRepo::new();
+        social
+            .expect_are_friends()
+            .with(eq("u1"), eq("friend"))
+            .returning(|_, _| Ok(true));
+
+        let response = invite_collaborator(
+            State(repos_with(posts, social)),
+            AuthUser(claims("u1")),
+            Path("p1".into()),
+            Json(InviteInput { user_id: "friend".into() }),
+        )
+        .await
+        .expect("invite should succeed");
+        assert_eq!(response.0["ok"], json!(true));
     }
 
     #[tokio::test]

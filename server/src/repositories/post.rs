@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 #[cfg(test)]
 use mockall::automock;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
 
@@ -20,6 +20,11 @@ struct CreatePostDb {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CountResult {
+    count: u64,
+}
+
 #[cfg_attr(test, automock)]
 #[async_trait]
 pub trait PostRepo: Send + Sync {
@@ -32,6 +37,14 @@ pub trait PostRepo: Send + Sync {
         state_vector_b64: String,
     ) -> Result<(), AppError>;
     async fn publish(&self, id: &str, content: String) -> Result<Post, AppError>;
+    /// Most-recent published posts, newest first.
+    async fn list_published(&self, limit: u32) -> Result<Vec<Post>, AppError>;
+    /// Returns true if there is an `invited_to` edge from `user_id` to the post.
+    /// The author is not included — callers must `OR` against the author check.
+    async fn is_invited(&self, post_id: &str, user_id: &str) -> Result<bool, AppError>;
+    /// Idempotently create an `invited_to` edge. Existence/friendship checks
+    /// live in the handler (cross-repo).
+    async fn add_invite(&self, post_id: &str, invitee_id: &str) -> Result<(), AppError>;
 }
 
 pub struct SurrealPostRepo {
@@ -102,5 +115,45 @@ impl PostRepo for SurrealPostRepo {
             .into_iter()
             .next()
             .ok_or_else(|| AppError::NotFound("Post not found".into()))
+    }
+
+    async fn list_published(&self, limit: u32) -> Result<Vec<Post>, AppError> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT * FROM post WHERE published = true \
+                 ORDER BY updated_at DESC LIMIT $limit",
+            )
+            .bind(("limit", limit))
+            .await?;
+        let posts: Vec<Post> = result.take(0)?;
+        Ok(posts)
+    }
+
+    async fn is_invited(&self, post_id: &str, user_id: &str) -> Result<bool, AppError> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT count() AS count FROM invited_to \
+                 WHERE in = $user AND out = $post GROUP BY count",
+            )
+            .bind(("user", surrealdb::RecordId::from(("user", user_id))))
+            .bind(("post", surrealdb::RecordId::from(("post", post_id))))
+            .await?;
+        let counts: Vec<CountResult> = result.take(0)?;
+        Ok(counts.first().map(|c| c.count > 0).unwrap_or(false))
+    }
+
+    async fn add_invite(&self, post_id: &str, invitee_id: &str) -> Result<(), AppError> {
+        // Idempotent: skip if the edge already exists.
+        if self.is_invited(post_id, invitee_id).await? {
+            return Ok(());
+        }
+        self.db
+            .query("RELATE $user -> invited_to -> $post SET created_at = time::now()")
+            .bind(("user", surrealdb::RecordId::from(("user", invitee_id))))
+            .bind(("post", surrealdb::RecordId::from(("post", post_id))))
+            .await?;
+        Ok(())
     }
 }

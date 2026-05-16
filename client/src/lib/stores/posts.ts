@@ -52,3 +52,17 @@ export async function publishPost(id: string): Promise<Post> {
   }));
   return res.post;
 }
+
+export async function inviteCollaborator(postId: string, userId: string): Promise<void> {
+  await api.post<{ ok: boolean }>(`/api/posts/${postId}/invites`, { user_id: userId });
+}
+
+export async function fetchPublishedPosts(): Promise<Post[]> {
+  const res = await api.get<{ posts: Post[] }>('/api/posts');
+  posts.update((state) => {
+    const next = { ...state.byId };
+    for (const p of res.posts) next[postIdToString(p)] = p;
+    return { byId: next };
+  });
+  return res.posts;
+}
