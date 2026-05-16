@@ -16,6 +16,27 @@
     }
     return '';
   }
+
+  function channelIcon(kind: string): string {
+    switch (kind) {
+      case 'whiteboard':
+        return '✎';
+      case 'voice':
+        return '🔊';
+      case 'collab':
+        return '✦';
+      default:
+        return '#';
+    }
+  }
+
+  function channelHref(serverId: string, channel: { channel_type: string; id: unknown }): string {
+    const id = getChannelId(channel);
+    if (channel.channel_type === 'whiteboard') {
+      return `/servers/${serverId}/channels/${id}/whiteboard`;
+    }
+    return `/servers/${serverId}/channels/${id}`;
+  }
 </script>
 
 <aside class="w-60 bg-gray-800 flex flex-col shrink-0">
@@ -23,14 +44,14 @@
     Channels
   </div>
   <div class="flex-1 overflow-y-auto p-2">
-    <p class="text-xs font-semibold text-gray-400 uppercase px-2 mb-1">Text Channels</p>
+    <p class="text-xs font-semibold text-gray-400 uppercase px-2 mb-1">Channels</p>
     {#each serverChannels as channel (getChannelId(channel))}
-      {@const id = getChannelId(channel)}
       <a
-        href="/servers/{serverId}/channels/{id}"
+        href={channelHref(serverId, channel)}
         class="px-2 py-1 rounded hover:bg-gray-700 cursor-pointer text-gray-300 block"
       >
-        # {channel.name}
+        <span class="inline-block w-5 text-center">{channelIcon(channel.channel_type)}</span>
+        {channel.name}
       </a>
     {:else}
       <p class="text-gray-500 text-sm px-2">No channels</p>
