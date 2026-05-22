@@ -146,9 +146,8 @@ mod tests {
     use crate::models::user::{User, UserStatus};
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
-        recommendations::MockRecommendationsRepo, server::MockServerRepo,
-        social::MockSocialRepo, user::MockUserRepo, watch::MockWatchRepo,
-        whiteboard::MockWhiteboardRepo,
+        recommendations::MockRecommendationsRepo, server::MockServerRepo, social::MockSocialRepo,
+        user::MockUserRepo, watch::MockWatchRepo, whiteboard::MockWhiteboardRepo,
     };
     use mockall::predicate::eq;
     use pretty_assertions::assert_eq;
@@ -208,7 +207,9 @@ mod tests {
         let response = send_friend_request(
             State(repos_with_social(social)),
             AuthUser(claims("user1")),
-            Json(FriendRequestInput { user_id: "user2".into() }),
+            Json(FriendRequestInput {
+                user_id: "user2".into(),
+            }),
         )
         .await
         .expect("handler should succeed");
@@ -219,14 +220,18 @@ mod tests {
     #[tokio::test]
     async fn send_friend_request_propagates_repo_error() {
         let mut social = MockSocialRepo::new();
-        social
-            .expect_send_friend_request()
-            .returning(|_, _| Err(AppError::BadRequest("Cannot send friend request to yourself".into())));
+        social.expect_send_friend_request().returning(|_, _| {
+            Err(AppError::BadRequest(
+                "Cannot send friend request to yourself".into(),
+            ))
+        });
 
         let result = send_friend_request(
             State(repos_with_social(social)),
             AuthUser(claims("user1")),
-            Json(FriendRequestInput { user_id: "user1".into() }),
+            Json(FriendRequestInput {
+                user_id: "user1".into(),
+            }),
         )
         .await;
 
@@ -249,7 +254,9 @@ mod tests {
         let response = accept_friend_request(
             State(repos_with_social(social)),
             AuthUser(claims("recipient")),
-            Json(AcceptRequestInput { user_id: "sender".into() }),
+            Json(AcceptRequestInput {
+                user_id: "sender".into(),
+            }),
         )
         .await
         .expect("handler should succeed");
@@ -285,14 +292,15 @@ mod tests {
             .with(eq("me"))
             .returning(|_| Ok(vec![user("u2", "alice"), user("u3", "bob")]));
 
-        let response = list_friends(
-            State(repos_with_social(social)),
-            AuthUser(claims("me")),
-        )
-        .await
-        .expect("handler should succeed");
+        let response = list_friends(State(repos_with_social(social)), AuthUser(claims("me")))
+            .await
+            .expect("handler should succeed");
 
-        let friends = response.0.get("friends").and_then(Value::as_array).expect("friends array");
+        let friends = response
+            .0
+            .get("friends")
+            .and_then(Value::as_array)
+            .expect("friends array");
         assert_eq!(friends.len(), 2);
     }
 
@@ -304,14 +312,16 @@ mod tests {
             .with(eq("me"))
             .returning(|_| Ok(vec![user("u9", "carol")]));
 
-        let response = list_pending_incoming(
-            State(repos_with_social(social)),
-            AuthUser(claims("me")),
-        )
-        .await
-        .expect("handler should succeed");
+        let response =
+            list_pending_incoming(State(repos_with_social(social)), AuthUser(claims("me")))
+                .await
+                .expect("handler should succeed");
 
-        let pending = response.0.get("pending").and_then(Value::as_array).expect("pending array");
+        let pending = response
+            .0
+            .get("pending")
+            .and_then(Value::as_array)
+            .expect("pending array");
         assert_eq!(pending.len(), 1);
     }
 
@@ -347,12 +357,10 @@ mod tests {
             .with(eq("me"), eq(20u32))
             .returning(|_, _| Ok(vec![]));
 
-        let response = get_friend_suggestions(
-            State(repos_with_social(social)),
-            AuthUser(claims("me")),
-        )
-        .await
-        .expect("handler should succeed");
+        let response =
+            get_friend_suggestions(State(repos_with_social(social)), AuthUser(claims("me")))
+                .await
+                .expect("handler should succeed");
 
         let suggestions = response
             .0

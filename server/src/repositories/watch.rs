@@ -2,8 +2,8 @@ use async_trait::async_trait;
 #[cfg(test)]
 use mockall::automock;
 use serde::{Deserialize, Serialize};
-use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
+use surrealdb::Surreal;
 
 use crate::error::AppError;
 use crate::models::watch::{QueueItem, WatchRoom};
@@ -87,12 +87,7 @@ pub trait WatchRepo: Send + Sync {
 
     /// Set this user's vote on an item. `value` must be -1, 0, or 1; 0 removes
     /// the vote. Returns the queue item's new total score after the change.
-    async fn set_vote(
-        &self,
-        user_id: &str,
-        item_id: &str,
-        value: i32,
-    ) -> Result<i32, AppError>;
+    async fn set_vote(&self, user_id: &str, item_id: &str, value: i32) -> Result<i32, AppError>;
 
     /// Upsert a `watched` edge from the user to the YouTube video. Dedupes by
     /// `(user, video_id)` — bumps `watch_count` + `last_watched` if exists.
@@ -209,7 +204,11 @@ impl WatchRepo for SurrealWatchRepo {
             max_pos: Option<i32>,
         }
         let rows: Vec<MaxRow> = q.take(0)?;
-        let next_pos = rows.first().and_then(|r| r.max_pos).map(|p| p + 1).unwrap_or(0);
+        let next_pos = rows
+            .first()
+            .and_then(|r| r.max_pos)
+            .map(|p| p + 1)
+            .unwrap_or(0);
 
         let now = chrono::Utc::now();
         let created: Option<QueueItem> = self
@@ -258,30 +257,26 @@ impl WatchRepo for SurrealWatchRepo {
     }
 
     async fn find_queue_item(&self, item_id: &str) -> Result<Option<QueueItem>, AppError> {
-        let item: Option<QueueItem> = self
-            .db
-            .select(("watch_queue_item", item_id))
-            .await?;
+        let item: Option<QueueItem> = self.db.select(("watch_queue_item", item_id)).await?;
         Ok(item)
     }
 
-    async fn set_vote(
-        &self,
-        user_id: &str,
-        item_id: &str,
-        value: i32,
-    ) -> Result<i32, AppError> {
+    async fn set_vote(&self, user_id: &str, item_id: &str, value: i32) -> Result<i32, AppError> {
         if !(-1..=1).contains(&value) {
-            return Err(AppError::BadRequest("vote value must be -1, 0, or 1".into()));
+            return Err(AppError::BadRequest(
+                "vote value must be -1, 0, or 1".into(),
+            ));
         }
         let user = surrealdb::RecordId::from(("user", user_id));
         let item = surrealdb::RecordId::from(("watch_queue_item", item_id));
 
         // Run DELETE + (optional) RELATE + score recompute as one transaction
         // so concurrent voters can't (a) wipe each other's edges mid-flight or
-        // (b) read a partial sum into the cached `score`. Surreal's BEGIN
-        // /COMMIT serializes the inner statements against the affected rows.
-        let mut q = if value != 0 {
+        // (b) read a partial sum into the cached `score`. Surreal's BEGIN/
+        // COMMIT serializes the inner statements against the affected rows.
+        // The UPDATE folds the new sum back into `watch_queue_item.score`
+        // atomically.
+        let write = if value != 0 {
             self.db
                 .query("BEGIN;")
                 .query("DELETE votes WHERE in = $user AND out = $item;")
@@ -289,43 +284,42 @@ impl WatchRepo for SurrealWatchRepo {
                     "RELATE $user -> votes -> $item SET value = $value, created_at = time::now();",
                 )
                 .query(
-                    "LET $total = (SELECT VALUE math::sum(value) FROM votes WHERE out = $item)[0] ?? 0; \
-                     UPDATE $item SET score = $total RETURN score;",
+                    "UPDATE $item SET score = \
+                     ((SELECT VALUE math::sum(value) FROM votes WHERE out = $item)[0] ?? 0);",
                 )
                 .query("COMMIT;")
                 .bind(("user", user))
-                .bind(("item", item))
+                .bind(("item", item.clone()))
                 .bind(("value", value))
-                .await?
+                .await
         } else {
             self.db
                 .query("BEGIN;")
                 .query("DELETE votes WHERE in = $user AND out = $item;")
                 .query(
-                    "LET $total = (SELECT VALUE math::sum(value) FROM votes WHERE out = $item)[0] ?? 0; \
-                     UPDATE $item SET score = $total RETURN score;",
+                    "UPDATE $item SET score = \
+                     ((SELECT VALUE math::sum(value) FROM votes WHERE out = $item)[0] ?? 0);",
                 )
                 .query("COMMIT;")
                 .bind(("user", user))
-                .bind(("item", item))
-                .await?
+                .bind(("item", item.clone()))
+                .await
         };
+        write?;
 
-        #[derive(Deserialize)]
-        struct ScoreRow {
-            score: i32,
-        }
-        // The score row comes from the last data-returning statement before
-        // COMMIT. We probe a few indices because Surreal's response numbering
-        // depends on whether transactional statements report their own slots.
-        for idx in [3usize, 2, 1, 0] {
-            if let Ok(rows) = q.take::<Vec<ScoreRow>>(idx) {
-                if let Some(row) = rows.into_iter().next() {
-                    return Ok(row.score);
-                }
-            }
-        }
-        Ok(0)
+        // Read the committed score in a separate query. The transaction above
+        // already serialized the write, so a follow-up read returns either
+        // our value or a strictly-later one — both are correct for queue
+        // ordering, and a second concurrent voter's broadcast will reconcile.
+        // Putting the read in its own statement gives a stable response shape
+        // (slot 0) and avoids fragile index probing into transaction output.
+        let mut q = self
+            .db
+            .query("SELECT VALUE score FROM $item")
+            .bind(("item", item))
+            .await?;
+        let scores: Vec<i32> = q.take(0)?;
+        Ok(scores.into_iter().next().unwrap_or(0))
     }
 
     async fn record_watched(

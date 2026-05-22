@@ -1,4 +1,5 @@
 pub mod connection;
+mod connection_helpers;
 pub mod presence;
 pub mod protocol;
 pub mod replay;
@@ -7,5 +8,6 @@ pub mod room_manager;
 pub mod sequence;
 pub mod user_connections;
 pub mod watch_room;
+mod watch_room_helpers;
 pub mod watch_room_manager;
 pub mod watch_types;

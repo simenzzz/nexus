@@ -50,9 +50,8 @@ mod tests {
     use crate::models::message::Message;
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
-        recommendations::MockRecommendationsRepo, server::MockServerRepo,
-        social::MockSocialRepo, user::MockUserRepo, watch::MockWatchRepo,
-        whiteboard::MockWhiteboardRepo,
+        recommendations::MockRecommendationsRepo, server::MockServerRepo, social::MockSocialRepo,
+        user::MockUserRepo, watch::MockWatchRepo, whiteboard::MockWhiteboardRepo,
     };
     use mockall::predicate::eq;
     use pretty_assertions::assert_eq;
@@ -115,10 +114,17 @@ mod tests {
             .returning(|_| Ok(None));
 
         let result = get_messages(
-            State(repos(channels, MockServerRepo::new(), MockMessageRepo::new())),
+            State(repos(
+                channels,
+                MockServerRepo::new(),
+                MockMessageRepo::new(),
+            )),
             AuthUser(claims("u1")),
             Path("c1".into()),
-            Query(ListMessagesQuery { before: None, limit: None }),
+            Query(ListMessagesQuery {
+                before: None,
+                limit: None,
+            }),
         )
         .await;
 
@@ -145,7 +151,10 @@ mod tests {
             State(repos(channels, servers, MockMessageRepo::new())),
             AuthUser(claims("u1")),
             Path("c1".into()),
-            Query(ListMessagesQuery { before: None, limit: None }),
+            Query(ListMessagesQuery {
+                before: None,
+                limit: None,
+            }),
         )
         .await;
 
@@ -175,12 +184,19 @@ mod tests {
             State(repos(channels, servers, messages)),
             AuthUser(claims("u1")),
             Path("c1".into()),
-            Query(ListMessagesQuery { before: None, limit: None }),
+            Query(ListMessagesQuery {
+                before: None,
+                limit: None,
+            }),
         )
         .await
         .expect("handler should succeed");
 
-        let arr = response.0.get("messages").and_then(Value::as_array).expect("messages array");
+        let arr = response
+            .0
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages array");
         assert_eq!(arr.len(), 0);
     }
 
@@ -205,7 +221,10 @@ mod tests {
             State(repos(channels, servers, messages)),
             AuthUser(claims("u1")),
             Path("c1".into()),
-            Query(ListMessagesQuery { before: None, limit: Some(500) }),
+            Query(ListMessagesQuery {
+                before: None,
+                limit: Some(500),
+            }),
         )
         .await
         .expect("handler should succeed");
@@ -235,12 +254,19 @@ mod tests {
             State(repos(channels, servers, messages)),
             AuthUser(claims("u1")),
             Path("c1".into()),
-            Query(ListMessagesQuery { before: None, limit: None }),
+            Query(ListMessagesQuery {
+                before: None,
+                limit: None,
+            }),
         )
         .await
         .expect("handler should succeed");
 
-        let arr = response.0.get("messages").and_then(Value::as_array).expect("messages array");
+        let arr = response
+            .0
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages array");
         let contents: Vec<&str> = arr
             .iter()
             .map(|m| m.get("content").and_then(Value::as_str).unwrap())

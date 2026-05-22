@@ -135,10 +135,7 @@ pub(crate) fn update_message(
     }
 }
 
-pub(crate) fn awareness_message(
-    r: &ResourceRef,
-    users: HashMap<String, Value>,
-) -> ServerMessage {
+pub(crate) fn awareness_message(r: &ResourceRef, users: HashMap<String, Value>) -> ServerMessage {
     match r.kind {
         ResourceKind::Post => ServerMessage::AwarenessState {
             post_id: r.id.clone(),

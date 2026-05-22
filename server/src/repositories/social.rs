@@ -2,8 +2,8 @@ use async_trait::async_trait;
 #[cfg(test)]
 use mockall::automock;
 use serde::Deserialize;
-use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
+use surrealdb::Surreal;
 
 use crate::error::AppError;
 use crate::models::user::User;
@@ -47,7 +47,9 @@ impl SocialRepo for SurrealSocialRepo {
     async fn send_friend_request(&self, from: &str, to: &str) -> Result<(), AppError> {
         // Prevent self-request
         if from == to {
-            return Err(AppError::BadRequest("Cannot send friend request to yourself".into()));
+            return Err(AppError::BadRequest(
+                "Cannot send friend request to yourself".into(),
+            ));
         }
 
         // Verify target user exists
@@ -58,12 +60,16 @@ impl SocialRepo for SurrealSocialRepo {
 
         // Check not already friends
         if self.are_friends(from, to).await? {
-            return Err(AppError::BadRequest("Already friends with this user".into()));
+            return Err(AppError::BadRequest(
+                "Already friends with this user".into(),
+            ));
         }
 
         // Check blocked in either direction
         if self.is_blocked(to, from).await? || self.is_blocked(from, to).await? {
-            return Err(AppError::BadRequest("Cannot send friend request to this user".into()));
+            return Err(AppError::BadRequest(
+                "Cannot send friend request to this user".into(),
+            ));
         }
 
         // Check for existing pending request (prevent duplicates)
@@ -135,9 +141,7 @@ impl SocialRepo for SurrealSocialRepo {
     async fn list_friends(&self, user: &str) -> Result<Vec<User>, AppError> {
         let mut result = self
             .db
-            .query(
-                "SELECT VALUE out.* FROM friends_with WHERE in = $user AND status = 'accepted'",
-            )
+            .query("SELECT VALUE out.* FROM friends_with WHERE in = $user AND status = 'accepted'")
             .bind(("user", surrealdb::RecordId::from(("user", user))))
             .await?;
         let friends: Vec<User> = result.take(0)?;
@@ -147,9 +151,7 @@ impl SocialRepo for SurrealSocialRepo {
     async fn list_pending_incoming(&self, user: &str) -> Result<Vec<User>, AppError> {
         let mut result = self
             .db
-            .query(
-                "SELECT VALUE in.* FROM friends_with WHERE out = $user AND status = 'pending'",
-            )
+            .query("SELECT VALUE in.* FROM friends_with WHERE out = $user AND status = 'pending'")
             .bind(("user", surrealdb::RecordId::from(("user", user))))
             .await?;
         let pending: Vec<User> = result.take(0)?;

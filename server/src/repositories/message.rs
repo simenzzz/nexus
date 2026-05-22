@@ -2,8 +2,8 @@ use async_trait::async_trait;
 #[cfg(test)]
 use mockall::automock;
 use serde::Serialize;
-use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
+use surrealdb::Surreal;
 
 use crate::error::AppError;
 use crate::models::message::Message;
@@ -118,7 +118,10 @@ impl MessageRepo for SurrealMessageRepo {
         let mut q = self
             .db
             .query(query)
-            .bind(("channel", surrealdb::RecordId::from(("channel", channel_id))))
+            .bind((
+                "channel",
+                surrealdb::RecordId::from(("channel", channel_id)),
+            ))
             .bind(("limit", limit));
 
         if let Some(before_id) = before {

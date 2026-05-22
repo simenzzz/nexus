@@ -33,6 +33,14 @@ pub fn record_rate_limit_rejection() {
     counter!("rate_limit_rejections_total").increment(1);
 }
 
+pub fn record_rec_breaker_trip() {
+    counter!("rec_breaker_trips_total").increment(1);
+}
+
+pub fn record_presence_flap_suppressed() {
+    counter!("presence_flap_suppressed_total").increment(1);
+}
+
 pub struct DbQueryTimer {
     start: Instant,
 }

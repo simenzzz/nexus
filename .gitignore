@@ -17,6 +17,7 @@ client/build/
 surreal-data/
 
 # IDE
+.claude/
 .vscode/
 .idea/
 *.swp

@@ -27,7 +27,7 @@ Replace the current single 24h JWT with a dual-token system and WS ticket-based 
 - **Lifetime**: 30 seconds
 - **Storage**: Redis with TTL
 - **Single-use**: Deleted from Redis after first use
-- **Flow**: Client calls `POST /api/auth/ws-ticket` (authenticated) to get a ticket, then connects to `ws://host/ws?ticket=<ticket>`
+- **Flow**: Client calls `POST /api/auth/ws-ticket` (authenticated) to get a ticket, connects to `ws://host/ws`, then sends `{ "type": "auth", "ticket": "...", "nonce": "..." }` as the first WebSocket message.
 
 ---
 

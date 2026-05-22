@@ -26,15 +26,29 @@ All messages are JSON with these common fields:
 - `type` — message type discriminator (string)
 - `ts` — server timestamp in epoch milliseconds (server-to-client only)
 
+### Clock contract
+
+All `ts` / `server_ts` fields are **server wall-clock** (`SystemTime::now()`
+since UNIX epoch, in milliseconds — `chrono::Utc::now().timestamp_millis()`
+on the server). Clients must not assume their local clock matches; in
+particular the watch-room drift controller projects playback as
+`position_ms + (now - server_ts) * rate` and falls back to the raw
+`position_ms` when `now - server_ts` is negative or exceeds 10 s (sleep/
+resume, queued message, or a clock skew large enough to make projection
+meaningless). Servers should never overwrite `server_ts` on relay — it must
+remain the originating server's emission timestamp.
+
 ---
 
 ## Client-to-Server Messages
 
 ### Authentication
 ```json
-{"v": 1, "type": "auth", "ticket": "<ws-ticket>"}
+{"v": 1, "type": "auth", "ticket": "<ws-ticket>", "nonce": "<nonce>"}
 ```
-First message after WS connect. Ticket obtained via `POST /api/auth/ws-ticket`.
+First message after WS connect. Ticket and nonce are obtained via
+`POST /api/auth/ws-ticket`. They are sent in the first WebSocket frame, not
+the upgrade URL, so proxy access logs do not capture the one-time credential.
 Server responds with `auth_ok` or closes the connection.
 
 ### Subscribe to Channel
@@ -145,7 +159,7 @@ Client                          Server
   │                               │
   │──── WS Connect ──────────────▶│
   │                               │
-  │──── auth {ticket} ───────────▶│  validate ticket (Redis, single-use)
+  │──── auth {ticket, nonce} ────▶│  validate ticket (Redis, single-use)
   │◀─── auth_ok ─────────────────│
   │                               │
   │──── resume {last_seq} ───────▶│  replay or resync per channel

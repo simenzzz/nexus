@@ -1,6 +1,6 @@
 # Nexus — Setup Guide
 
-## Option A: Docker (Recommended)
+## Option A: Local Docker
 
 The entire stack runs from a single command. No Rust, Node, or SurrealDB installation needed.
 
@@ -37,7 +37,59 @@ docker compose down
 docker compose down -v
 ```
 
-## Option B: Local Development
+## Option B: Production Docker on a VPS
+
+Use this path for a public deployment behind a real domain. Caddy is the only
+public ingress and provisions HTTPS automatically; the client, API, Redis, and
+SurrealDB stay on the private Compose network.
+
+### Prerequisites
+
+- Linux VPS with Docker and Docker Compose
+- DNS `A`/`AAAA` record for your domain pointing at the VPS
+- Host firewall allowing only SSH, HTTP 80, and HTTPS 443
+
+### Steps
+
+```bash
+# 1. Configure production secrets
+cp .env.example .env
+```
+
+Set these values in `.env`:
+
+```bash
+NEXUS_ENV=production
+DOMAIN=app.example.com
+ACME_EMAIL=admin@example.com
+JWT_SECRET=<openssl rand -hex 32>
+SURREAL_USER=nexus-admin
+SURREAL_PASS=<openssl rand -hex 24>
+REDIS_PASSWORD=<openssl rand -hex 24>
+SECURE_COOKIES=true
+CORS_ORIGIN=https://app.example.com
+```
+
+Leave `PUBLIC_API_URL` and `PUBLIC_WS_URL` at their example values or blank;
+the production override clears them so the browser uses same-origin `/api`
+and `/ws` through Caddy.
+
+```bash
+# 2. Confirm the merged production config exposes only Caddy ports
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+
+# 3. Build and start the stack
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+# 4. Check service readiness
+curl -fsS https://app.example.com/health
+curl -fsS https://app.example.com/ready
+```
+
+Expected public ports in the merged config are only `80:80`, `443:443`, and
+`443:443/udp` on the `caddy` service.
+
+## Option C: Local Development
 
 For faster iteration with hot-reload on both frontend and backend.
 
@@ -56,8 +108,8 @@ cp .env.example .env
 ```
 
 ```bash
-# 2. Start SurrealDB only
-docker compose up surrealdb -d
+# 2. Start SurrealDB and run the schema bootstrap
+docker compose up surrealdb surreal-init
 ```
 
 ```bash
@@ -85,6 +137,9 @@ npm run dev
 
 - **Port 8000 in use**: Another service is using the SurrealDB port. Stop it or change the port in `docker-compose.yml` and `.env`.
 - **Port 3001 in use**: Change `SERVER_PORT` in `.env`.
+- **Production config exposes Redis/DB/API ports**: Ensure the prod override is included: `docker compose -f docker-compose.yml -f docker-compose.prod.yml config`.
+- **Production server exits immediately**: Check `.env` for placeholder values. Production mode rejects `root` Surreal credentials, short secrets, insecure cookies, and missing CORS origin.
+- **Login works but refresh/logout fails**: Confirm the site is loaded over `https://DOMAIN` and browser cookies include `__Host-refresh_token` and `__Host-csrf_token`.
 - **Docker build fails on Rust**: The Rust build needs ~2GB RAM. Ensure Docker has enough memory allocated.
 - **Cargo build fails locally**: Ensure latest stable Rust: `rustup update stable`.
 - **npm install fails**: Ensure Node >= 20: `node --version`.

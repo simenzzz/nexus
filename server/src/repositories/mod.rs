@@ -10,8 +10,8 @@ pub mod whiteboard;
 
 use std::sync::Arc;
 
-use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
+use surrealdb::Surreal;
 
 #[derive(Clone)]
 pub struct Repos {

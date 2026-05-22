@@ -93,10 +93,10 @@ Identified before implementation, drawing from Discord, Slack, Netflix, and Jira
 
 **Risk areas**:
 - 24h JWT with no refresh flow — token expires mid-session, WS drops, state lost
-- WS token in query params — ends up in server logs, proxy logs, browser history
+- Historical WS URL credentials — ended up in server logs, proxy logs, browser history
 - No rate limiting — one bad actor can flood the system
 
-**Mitigation**: See `auth-design.md` for the full overhaul. Short-lived access tokens (15min) + refresh tokens. WS ticket-based auth. Rate limiting middleware from day one.
+**Mitigation**: See `auth-design.md` for the full overhaul. Short-lived access tokens (15min) + refresh tokens. WS ticket-based auth in the first WebSocket frame. Rate limiting middleware from day one.
 
 ---
 

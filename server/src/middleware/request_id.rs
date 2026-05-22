@@ -4,10 +4,7 @@ use axum::middleware::Next;
 
 const X_REQUEST_ID: &str = "x-request-id";
 
-pub async fn request_id_middleware(
-    mut req: Request<Body>,
-    next: Next,
-) -> Response<Body> {
+pub async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response<Body> {
     let request_id = req
         .headers()
         .get(X_REQUEST_ID)

@@ -30,6 +30,12 @@ export interface SyncController {
 const DRIFT_IGNORE_MS = 200;
 const DRIFT_HARD_SEEK_MS = 500;
 const RATE_CORRECTION_DURATION_MS = 4_000;
+// Bound on `Date.now() - server_ts` we trust for projection. Negative means
+// our wall clock is behind the server's; large positive likely means a
+// suspend/resume or a stale message that sat in a queue. In either case the
+// drift band logic silently breaks, so we fall back to the raw server
+// position and let the next pulse re-anchor us.
+const PROJECTION_MAX_ELAPSED_MS = 10_000;
 
 export function createSyncController(player: YouTubePlayer): SyncController {
   let lastVideoId: string | null = null;
@@ -38,7 +44,10 @@ export function createSyncController(player: YouTubePlayer): SyncController {
   function projectedServerPosition(playback: WatchPlayback): number {
     if (playback.paused) return playback.position_ms;
     const elapsed = Date.now() - playback.server_ts;
-    return playback.position_ms + Math.max(0, elapsed) * playback.rate;
+    if (elapsed < 0 || elapsed > PROJECTION_MAX_ELAPSED_MS) {
+      return playback.position_ms;
+    }
+    return playback.position_ms + elapsed * playback.rate;
   }
 
   function clearRateRevert(): void {

@@ -21,10 +21,7 @@ pub async fn store_message(
         .await?;
 
     // Trim: only remove excess messages when buffer exceeds max
-    let count: i64 = redis::cmd("ZCARD")
-        .arg(&key)
-        .query_async(&mut conn)
-        .await?;
+    let count: i64 = redis::cmd("ZCARD").arg(&key).query_async(&mut conn).await?;
 
     if count > MAX_REPLAY {
         redis::cmd("ZREMRANGEBYRANK")

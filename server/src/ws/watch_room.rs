@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
 use crate::repositories::watch::{PlaybackPersist, WatchRepo};
 use crate::ws::protocol::ServerMessage;
-use crate::ws::watch_room_manager::WatchRoomManager;
-use crate::ws::watch_types::{
-    PlaybackSummary, QueueItemSummary, ViewerSummary, WatchCommand,
+use crate::ws::watch_room_helpers::{
+    is_valid_reaction_emoji, is_valid_youtube_id, now_ms, send_error, sort_queue,
 };
+use crate::ws::watch_room_manager::WatchRoomManager;
+use crate::ws::watch_types::{PlaybackSummary, QueueItemSummary, ViewerSummary, WatchCommand};
 
 struct Subscriber {
     username: String,
@@ -278,6 +278,24 @@ async fn handle_command(
                 state.leader_id = Some(user_id.clone());
             }
 
+            // Best-effort persistence. Join has no reply channel; if this
+            // fails, the in-memory actor remains canonical until the next save.
+            if promoted {
+                tracing::info!(
+                    leader = %user_id,
+                    channel = %state.channel_id,
+                    "Promoted first joiner to leader"
+                );
+                if let Err(e) = persist_playback(state, watch_repo).await {
+                    tracing::warn!(
+                        channel = %state.channel_id,
+                        error = %e,
+                        "failed to persist leader promotion on join"
+                    );
+                    state.leader_id = None;
+                }
+            }
+
             // Send the room state directly to the joiner so they can hydrate
             // before any subsequent broadcasts arrive.
             let snapshot = state.state_message().to_json();
@@ -288,15 +306,6 @@ async fn handle_command(
             let updated = state.state_message().to_json();
             let dead = state.broadcast(updated, Some(&user_id));
             state.reap_dead(dead);
-
-            if promoted {
-                tracing::info!(
-                    leader = %user_id,
-                    channel = %state.channel_id,
-                    "Promoted first joiner to leader"
-                );
-                let _ = persist_playback(state, watch_repo).await;
-            }
         }
         WatchCommand::Leave { user_id } => {
             if state.subscribers.remove(&user_id).is_some() {
@@ -318,6 +327,18 @@ async fn handle_command(
                     None
                 };
 
+                // Best-effort persistence. Disconnect has no reply channel;
+                // the in-memory actor remains canonical until the next save.
+                if was_leader {
+                    if let Err(e) = persist_playback(state, watch_repo).await {
+                        tracing::warn!(
+                            channel = %state.channel_id,
+                            error = %e,
+                            "failed to persist leader change on leave"
+                        );
+                    }
+                }
+
                 if !state.subscribers.is_empty() {
                     if let Some(ref new_leader) = leader_change {
                         let msg = ServerMessage::WatchLeaderChanged {
@@ -333,10 +354,6 @@ async fn handle_command(
                     let dead = state.broadcast(updated, None);
                     state.reap_dead(dead);
                 }
-
-                if was_leader {
-                    let _ = persist_playback(state, watch_repo).await;
-                }
             }
         }
         WatchCommand::TransferLeader {
@@ -345,16 +362,43 @@ async fn handle_command(
             reply_to,
         } => {
             if state.leader_id.as_deref() != Some(from_user.as_str()) {
-                send_error(&reply_to, &state.channel_id, "not_leader",
-                    "Only the current leader can transfer leadership");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "not_leader",
+                    "Only the current leader can transfer leadership",
+                );
                 return;
             }
             if !state.subscribers.contains_key(&to_user) {
-                send_error(&reply_to, &state.channel_id, "target_not_connected",
-                    "Target user is not currently in the room");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "target_not_connected",
+                    "Target user is not currently in the room",
+                );
                 return;
             }
+            let old_leader = state.leader_id.clone();
             state.leader_id = Some(to_user.clone());
+            // Persist before broadcasting so a crash mid-transfer doesn't
+            // leave the DB pointing at the old leader while clients act on
+            // the new one. Persistence failure is logged but non-fatal.
+            if let Err(e) = persist_playback(state, watch_repo).await {
+                tracing::warn!(
+                    channel = %state.channel_id,
+                    error = %e,
+                    "failed to persist leader transfer"
+                );
+                state.leader_id = old_leader;
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "persist_failed",
+                    "Leadership transfer could not be saved",
+                );
+                return;
+            }
             let msg = ServerMessage::WatchLeaderChanged {
                 channel_id: state.channel_id.clone(),
                 leader_id: to_user,
@@ -363,7 +407,6 @@ async fn handle_command(
             .to_json();
             let dead = state.broadcast(msg, None);
             state.reap_dead(dead);
-            let _ = persist_playback(state, watch_repo).await;
         }
         WatchCommand::PlaybackControl {
             from_user,
@@ -372,8 +415,12 @@ async fn handle_command(
             reply_to,
         } => {
             if state.leader_id.as_deref() != Some(from_user.as_str()) {
-                send_error(&reply_to, &state.channel_id, "not_leader",
-                    "Only the leader can control playback");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "not_leader",
+                    "Only the leader can control playback",
+                );
                 return;
             }
             // Validate action whitelist defensively; the protocol carries a
@@ -385,16 +432,38 @@ async fn handle_command(
                 _ => (state.playback.paused, false),
             };
             if !valid {
-                send_error(&reply_to, &state.channel_id, "bad_action",
-                    "action must be play, pause, or seek");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "bad_action",
+                    "action must be play, pause, or seek",
+                );
                 return;
             }
             // Reject negative positions — common cause is a bad client clock.
             let clamped = position_ms.max(0);
             let server_ts = now_ms();
+            let old_playback = state.playback.clone();
             state.playback.paused = new_paused;
             state.playback.position_ms = clamped;
             state.playback.server_ts = server_ts;
+
+            // Persist before broadcast so the DB matches what followers see.
+            if let Err(e) = persist_playback(state, watch_repo).await {
+                tracing::warn!(
+                    channel = %state.channel_id,
+                    error = %e,
+                    "failed to persist playback transition"
+                );
+                state.playback = old_playback;
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "persist_failed",
+                    "Playback transition could not be saved",
+                );
+                return;
+            }
 
             let msg = ServerMessage::WatchPlayback {
                 channel_id: state.channel_id.clone(),
@@ -406,7 +475,6 @@ async fn handle_command(
             .to_json();
             let dead = state.broadcast(msg, None);
             state.reap_dead(dead);
-            let _ = persist_playback(state, watch_repo).await;
         }
         WatchCommand::QueueAdd {
             from_user,
@@ -420,12 +488,28 @@ async fn handle_command(
             // Validate the YouTube video id shape — 11 chars, URL-safe alphabet.
             // Catches accidental URL-pastes and hostile payloads.
             if !is_valid_youtube_id(&video_id) {
-                send_error(&reply_to, &state.channel_id, "bad_video_id",
-                    "video_id must be an 11-character YouTube id");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "bad_video_id",
+                    "video_id must be an 11-character YouTube id",
+                );
                 return;
             }
-            // Cap title length so the queue payload stays bounded.
-            let title = title.chars().take(200).collect::<String>();
+            // Defense-in-depth: the connection handler already rejects
+            // oversize titles. If we somehow received one here, log loudly
+            // and truncate rather than panic — the boundary check was
+            // bypassed.
+            let title = if title.chars().count() > 200 {
+                tracing::warn!(
+                    user = %from_user,
+                    channel = %state.channel_id,
+                    "oversize watch title hit the room actor; boundary check missed"
+                );
+                title.chars().take(200).collect::<String>()
+            } else {
+                title
+            };
             let item = match watch_repo
                 .add_queue_item(
                     &state.channel_id,
@@ -440,7 +524,12 @@ async fn handle_command(
                 Ok(item) => item,
                 Err(e) => {
                     tracing::warn!(channel = %state.channel_id, error = %e, "queue add failed");
-                    send_error(&reply_to, &state.channel_id, "internal", "Failed to add item");
+                    send_error(
+                        &reply_to,
+                        &state.channel_id,
+                        "internal",
+                        "Failed to add item",
+                    );
                     return;
                 }
             };
@@ -458,19 +547,32 @@ async fn handle_command(
                 sort_queue(&mut state.queue);
             }
 
-            let _ = reply_to.try_send(
-                ServerMessage::WatchQueueAck {
-                    channel_id: state.channel_id.clone(),
-                    nonce,
-                    item_id,
-                }
-                .to_json(),
-            );
+            let ack_sent = reply_to
+                .try_send(
+                    ServerMessage::WatchQueueAck {
+                        channel_id: state.channel_id.clone(),
+                        nonce,
+                        item_id,
+                    }
+                    .to_json(),
+                )
+                .is_ok();
 
             if advance {
                 broadcast_advance(state);
             } else {
                 broadcast_queue_update(state);
+            }
+
+            // If the per-client ack channel was closed or full, the client
+            // never sees the targeted ack. The room-wide broadcast above
+            // (queue_update or advance) lets the optimistic entry converge
+            // via reconciliation rather than leaving the client spinning.
+            if !ack_sent {
+                tracing::warn!(
+                    channel = %state.channel_id,
+                    "WatchQueueAck send failed; relying on broadcast to reconcile"
+                );
             }
         }
         WatchCommand::QueueRemove {
@@ -479,19 +581,33 @@ async fn handle_command(
             reply_to,
         } => {
             let Some(idx) = state.queue.iter().position(|q| q.id == item_id) else {
-                send_error(&reply_to, &state.channel_id, "not_found", "Queue item not found");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "not_found",
+                    "Queue item not found",
+                );
                 return;
             };
             let is_adder = state.queue[idx].added_by == from_user;
             let is_leader = state.leader_id.as_deref() == Some(from_user.as_str());
             if !is_adder && !is_leader {
-                send_error(&reply_to, &state.channel_id, "forbidden",
-                    "Only the adder or the leader can remove this item");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "forbidden",
+                    "Only the adder or the leader can remove this item",
+                );
                 return;
             }
             if let Err(e) = watch_repo.remove_queue_item(&item_id).await {
                 tracing::warn!(channel = %state.channel_id, error = %e, "queue remove failed");
-                send_error(&reply_to, &state.channel_id, "internal", "Failed to remove item");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "internal",
+                    "Failed to remove item",
+                );
                 return;
             }
             state.queue.remove(idx);
@@ -504,19 +620,33 @@ async fn handle_command(
             reply_to,
         } => {
             if !(-1..=1).contains(&value) {
-                send_error(&reply_to, &state.channel_id, "bad_value",
-                    "vote value must be -1, 0, or 1");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "bad_value",
+                    "vote value must be -1, 0, or 1",
+                );
                 return;
             }
             if !state.queue.iter().any(|q| q.id == item_id) {
-                send_error(&reply_to, &state.channel_id, "not_found", "Queue item not found");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "not_found",
+                    "Queue item not found",
+                );
                 return;
             }
             let new_score = match watch_repo.set_vote(&from_user, &item_id, value).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(channel = %state.channel_id, error = %e, "vote failed");
-                    send_error(&reply_to, &state.channel_id, "internal", "Failed to record vote");
+                    send_error(
+                        &reply_to,
+                        &state.channel_id,
+                        "internal",
+                        "Failed to record vote",
+                    );
                     return;
                 }
             };
@@ -528,19 +658,37 @@ async fn handle_command(
             sort_queue(&mut state.queue);
             broadcast_queue_update(state);
         }
-        WatchCommand::Skip { from_user, reply_to } => {
+        WatchCommand::Skip {
+            from_user,
+            reply_to,
+        } => {
             if state.leader_id.as_deref() != Some(from_user.as_str()) {
-                send_error(&reply_to, &state.channel_id, "not_leader",
-                    "Only the leader can skip");
+                send_error(
+                    &reply_to,
+                    &state.channel_id,
+                    "not_leader",
+                    "Only the leader can skip",
+                );
                 return;
             }
             advance_queue(state, watch_repo).await;
             broadcast_advance(state);
         }
-        WatchCommand::Progress { from_user, position_ms } => {
+        WatchCommand::Progress {
+            from_user,
+            position_ms,
+        } => {
             // Leader-only — followers can't drive completion detection
-            // because their playback may lag arbitrarily.
+            // because their playback may lag arbitrarily. Log at debug so a
+            // stuck-follower or buggy client is diagnosable without giving
+            // every dropped message an error-path round trip (Progress has no
+            // reply channel in the protocol).
             if state.leader_id.as_deref() != Some(from_user.as_str()) {
+                tracing::debug!(
+                    user_id = %from_user,
+                    channel = %state.channel_id,
+                    "dropping watch progress from non-leader"
+                );
                 return;
             }
             let video_id = match state.playback.video_id.clone() {
@@ -591,12 +739,28 @@ async fn handle_command(
                 broadcast_advance(state);
             }
         }
-        WatchCommand::Reaction { from_user, username, emoji } => {
+        WatchCommand::Reaction {
+            from_user,
+            username,
+            emoji,
+        } => {
             // Reactions echo to everyone including the sender so all clients
             // render identically. Skip silently if the user somehow isn't a
             // subscriber — connection.rs already enforces this, but defense
             // in depth keeps us from leaking spurious broadcasts.
             if !state.subscribers.contains_key(&from_user) {
+                return;
+            }
+            // Defense-in-depth: the WS boundary already trims and caps at
+            // 32 bytes, but the actor also rejects anything outside a safe
+            // emoji shape so a future code path that bypasses connection.rs
+            // can't fan out junk to every viewer.
+            if !is_valid_reaction_emoji(&emoji) {
+                tracing::debug!(
+                    user_id = %from_user,
+                    channel = %state.channel_id,
+                    "dropping invalid reaction emoji"
+                );
                 return;
             }
             let msg = ServerMessage::WatchReaction {
@@ -673,79 +837,4 @@ fn broadcast_advance(state: &mut WatchRoomState) {
     .to_json();
     let dead = state.broadcast(msg, None);
     state.reap_dead(dead);
-}
-
-fn sort_queue(queue: &mut [QueueItemSummary]) {
-    // Score desc; ties broken by id asc so the in-memory order matches what
-    // `WatchRepo::list_queue` returns from the DB (which orders by
-    // `score DESC, created_at ASC`). The `id` proxy is stable across votes
-    // because Surreal ids are monotonic per session and `created_at` ordering
-    // tracks insertion order in practice.
-    queue.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
-}
-
-/// YouTube video ids are exactly 11 characters from the URL-safe base64
-/// alphabet. We use this both as input validation (against pasted URLs) and
-/// as a guard against arbitrary payloads getting persisted.
-fn is_valid_youtube_id(id: &str) -> bool {
-    id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn valid_youtube_id_passes() {
-        assert!(is_valid_youtube_id("dQw4w9WgXcQ"));
-        assert!(is_valid_youtube_id("_-aaaaaaaaa"));
-    }
-
-    #[test]
-    fn invalid_youtube_id_rejected() {
-        assert!(!is_valid_youtube_id("tooshort"));
-        assert!(!is_valid_youtube_id("waytoolongforanid"));
-        assert!(!is_valid_youtube_id("badchar!!!!"));
-        assert!(!is_valid_youtube_id(""));
-    }
-
-    #[test]
-    fn sort_queue_orders_by_score_desc() {
-        let mut q = vec![
-            QueueItemSummary {
-                id: "a".into(), video_id: "v1".into(), title: "".into(),
-                duration_ms: 0, thumbnail_url: None, added_by: "u".into(), score: 1,
-            },
-            QueueItemSummary {
-                id: "b".into(), video_id: "v2".into(), title: "".into(),
-                duration_ms: 0, thumbnail_url: None, added_by: "u".into(), score: 5,
-            },
-            QueueItemSummary {
-                id: "c".into(), video_id: "v3".into(), title: "".into(),
-                duration_ms: 0, thumbnail_url: None, added_by: "u".into(), score: -2,
-            },
-        ];
-        sort_queue(&mut q);
-        assert_eq!(q[0].id, "b");
-        assert_eq!(q[1].id, "a");
-        assert_eq!(q[2].id, "c");
-    }
-}
-
-fn send_error(tx: &mpsc::Sender<String>, channel_id: &str, code: &str, message: &str) {
-    let _ = tx.try_send(
-        ServerMessage::WatchError {
-            channel_id: channel_id.to_string(),
-            code: code.to_string(),
-            message: message.to_string(),
-        }
-        .to_json(),
-    );
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

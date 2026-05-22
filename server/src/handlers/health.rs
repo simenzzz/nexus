@@ -14,7 +14,10 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     let output = state.metrics_handle.render();
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         output,
     )
 }
@@ -24,7 +27,10 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     let redis_ok = check_redis(&state).await;
 
     if db_ok && redis_ok {
-        (axum::http::StatusCode::OK, Json(json!({ "status": "ready" })))
+        (
+            axum::http::StatusCode::OK,
+            Json(json!({ "status": "ready" })),
+        )
     } else {
         let mut details = Vec::new();
         if !db_ok {

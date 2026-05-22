@@ -1,28 +1,82 @@
+# Local-development stack. For production use the override:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Every service has a healthcheck. The server waits on surrealdb + redis to
+# become healthy AND on the surreal-init one-shot to exit successfully, so
+# the schema is in place before the app touches the DB.
+
 services:
   surrealdb:
     image: surrealdb/surrealdb:v2
     pull_policy: always
-    command: start --user root --pass root file:/data/nexus.db
+    # SURREAL_USER / SURREAL_PASS must be set explicitly — no defaults here so
+    # a misconfigured deploy fails fast instead of silently starting `root/root`.
+    command:
+      - start
+      - --user
+      - ${SURREAL_USER:?SURREAL_USER not set in .env}
+      - --pass
+      - ${SURREAL_PASS:?SURREAL_PASS not set in .env}
+      - --log
+      - info
+      - file:/data/nexus.db
     ports:
       - "8000:8000"
     volumes:
       - surreal-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "surreal", "is-ready"]
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://localhost:8000"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # One-shot schema bootstrap. Idempotent — re-runs on every `up` and DEFINE
+  # IF NOT EXISTS skips anything that already exists.
+  surreal-init:
+    image: surrealdb/surrealdb:v2
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    volumes:
+      - ./db:/db:ro
+    entrypoint:
+      - /surreal
+      - import
+      - --endpoint
+      - http://surrealdb:8000
+      - --user
+      - ${SURREAL_USER:?SURREAL_USER not set in .env}
+      - --pass
+      - ${SURREAL_PASS:?SURREAL_PASS not set in .env}
+      - --namespace
+      - ${SURREAL_NS:-nexus}
+      - --database
+      - ${SURREAL_DB:-nexus}
+      - /db/init.surql
+    restart: "no"
+
   redis:
     image: redis:7-alpine
+    # Require AUTH even on the internal docker network — defense in depth
+    # against a container escape from a sibling. Dev .env ships a default
+    # password but production must override.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD not set in .env}
+      - --save
+      - "60"
+      - "1"
+      - --appendonly
+      - "no"
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -34,12 +88,24 @@ services:
     ports:
       - "3001:3001"
     env_file: .env
+    environment:
+      # Override host inside the container — .env may have host-local defaults.
+      SURREAL_URL: ws://surrealdb:8000
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       surrealdb:
         condition: service_healthy
       redis:
         condition: service_healthy
+      surreal-init:
+        condition: service_completed_successfully
     restart: unless-stopped
+    # No HEALTHCHECK at the container level — the distroless runtime has no
+    # shell or curl. Compose's `depends_on` chain above gates the client on
+    # the DB + Redis + schema-init being ready; once those are up, the server
+    # is the only remaining startup hop and its /ready endpoint is exposed
+    # for external probes (Caddy in prod).
 
   client:
     build:
@@ -48,10 +114,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - PUBLIC_API_URL=http://localhost:3001
-      - PUBLIC_WS_URL=ws://localhost:3001/ws
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3001}
+      PUBLIC_WS_URL: ${PUBLIC_WS_URL:-ws://localhost:3001/ws}
     depends_on:
-      - server
+      server:
+        condition: service_started
     restart: unless-stopped
 
 volumes:

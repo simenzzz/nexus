@@ -183,11 +183,7 @@ mod tests {
         channels: MockChannelRepo,
         servers: MockServerRepo,
     ) -> WhiteboardStore {
-        WhiteboardStore::new(
-            Arc::new(whiteboards),
-            Arc::new(channels),
-            Arc::new(servers),
-        )
+        WhiteboardStore::new(Arc::new(whiteboards), Arc::new(channels), Arc::new(servers))
     }
 
     #[tokio::test]
@@ -249,10 +245,7 @@ mod tests {
         let servers = MockServerRepo::new();
 
         let s = store(wbs, chans, servers);
-        let snap = s
-            .load(&ResourceRef::whiteboard("c1"))
-            .await
-            .expect("load");
+        let snap = s.load(&ResourceRef::whiteboard("c1")).await.expect("load");
         assert_eq!(snap.state_b64, "");
         assert_eq!(snap.state_vector_b64, "");
     }

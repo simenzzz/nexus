@@ -1,0 +1,47 @@
+# Caddy will auto-provision TLS from Let's Encrypt for $DOMAIN. The HTTP→HTTPS
+# upgrade is automatic.
+#
+# Routing:
+#   /api/*          →  Rust backend (nexus-server)
+#   /ws             →  Rust backend (WebSocket upgrade passes through natively)
+#   /health,/ready  →  Rust backend readiness probes
+#   /               →  SvelteKit SSR (nexus-client)
+
+{
+    email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    @api path /api/* /ws /health /ready
+    handle @api {
+        reverse_proxy server:3001 {
+            # Forward original headers so the backend sees the real client IP
+            # for rate limiting + audit logging.
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    handle {
+        reverse_proxy client:3000
+    }
+
+    header {
+        # HSTS — 1 year, includeSubDomains, preload-eligible.
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options DENY
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+
+    # Cap upload size on the public surface — must match the server's
+    # DefaultBodyLimit so requests aren't accepted by Caddy and then 413'd
+    # downstream. 1 MB is plenty for JSON payloads.
+    request_body {
+        max_size 1MB
+    }
+}

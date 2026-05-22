@@ -54,7 +54,10 @@ mod tests {
     async fn each_hash_uses_a_fresh_salt() {
         let h1 = hash_password("same").await.unwrap();
         let h2 = hash_password("same").await.unwrap();
-        assert_ne!(h1, h2, "two hashes of the same password must differ (random salt)");
+        assert_ne!(
+            h1, h2,
+            "two hashes of the same password must differ (random salt)"
+        );
     }
 
     #[tokio::test]

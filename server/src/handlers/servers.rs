@@ -22,7 +22,9 @@ pub async fn create_server(
     // Validate server name
     let name = input.name.trim();
     if name.is_empty() || name.len() > 100 {
-        return Err(AppError::BadRequest("Server name must be 1-100 characters".into()));
+        return Err(AppError::BadRequest(
+            "Server name must be 1-100 characters".into(),
+        ));
     }
 
     let server = state.repos.servers.create(input, &claims.sub).await?;
@@ -34,7 +36,11 @@ pub async fn create_server(
         .map(extract_record_key)?;
 
     // Auto-add owner as member
-    state.repos.servers.add_member(&server_id, &claims.sub).await?;
+    state
+        .repos
+        .servers
+        .add_member(&server_id, &claims.sub)
+        .await?;
 
     // Auto-create #general channel
     let general = CreateChannel {

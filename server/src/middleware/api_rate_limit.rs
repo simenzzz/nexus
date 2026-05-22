@@ -18,9 +18,7 @@ pub async fn api_rate_limit_middleware(
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .and_then(|token| {
-            validate_access_token(token, &state.config.jwt_secret).ok()
-        })
+        .and_then(|token| validate_access_token(token, &state.config.jwt_secret).ok())
         .map(|claims| claims.sub);
 
     let rate_key = match &user_id {

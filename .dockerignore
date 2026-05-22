@@ -1,0 +1,20 @@
+# Root-level ignore for any build context that doesn't override it.
+.git
+.gitignore
+.github
+.claude
+.dockerignore
+.env
+.env.*
+!.env.example
+target
+node_modules
+build
+.svelte-kit
+ProjectDocs
+roadmaps
+docs
+*.md
+!README.md
+docker-compose*.yml
+Caddyfile

@@ -2,8 +2,8 @@ use async_trait::async_trait;
 #[cfg(test)]
 use mockall::automock;
 use serde::{Deserialize, Serialize};
-use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
+use surrealdb::Surreal;
 
 use crate::error::AppError;
 
@@ -28,8 +28,11 @@ pub trait RecommendationsRepo: Send + Sync {
     /// Up to `limit` video recommendations for this user. Excludes videos
     /// already in the user's `watched` edges. Empty when the user has no
     /// server peers with `watched` history.
-    async fn for_user(&self, user_id: &str, limit: u32)
-        -> Result<Vec<VideoRecommendation>, AppError>;
+    async fn for_user(
+        &self,
+        user_id: &str,
+        limit: u32,
+    ) -> Result<Vec<VideoRecommendation>, AppError>;
 }
 
 pub struct SurrealRecommendationsRepo {

@@ -80,6 +80,14 @@ pub fn auth_register_key(ip: &str) -> String {
     format!("rate:register:{ip}")
 }
 
+pub fn auth_refresh_key(user_id: &str) -> String {
+    format!("rate:refresh:{user_id}")
+}
+
+pub fn auth_ws_ticket_key(user_id: &str) -> String {
+    format!("rate:wsticket:{user_id}")
+}
+
 pub fn whiteboard_update_key(user_id: &str, channel_id: &str) -> String {
     format!("rate:wb:upd:{user_id}:{channel_id}")
 }

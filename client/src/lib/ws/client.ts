@@ -1,8 +1,7 @@
-import { browser } from '$app/environment';
+import { browser, dev } from '$app/environment';
+import { env } from '$env/dynamic/public';
 import { api } from '$lib/api/client';
 import { getLastSeqPerChannel } from '$stores/chat';
-
-const WS_URL = import.meta.env.PUBLIC_WS_URL ?? 'ws://localhost:3001/ws';
 
 export interface WsMessage {
   v: number;
@@ -11,6 +10,14 @@ export interface WsMessage {
 }
 
 type MessageHandler = (message: WsMessage) => void;
+
+function websocketUrl(): string {
+  const configured = env.PUBLIC_WS_URL?.trim();
+  if (configured) return configured;
+  if (dev) return 'ws://localhost:3001/ws';
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws`;
+}
 
 class WebSocketClient {
   private ws: WebSocket | null = null;
@@ -33,20 +40,23 @@ class WebSocketClient {
     this.shouldReconnect = true;
 
     try {
-      const { ticket } = await api.post<{ ticket: string }>('/api/auth/ws-ticket');
-      this.doConnect(ticket);
+      const { ticket, nonce } = await api.post<{ ticket: string; nonce: string }>(
+        '/api/auth/ws-ticket'
+      );
+      this.doConnect(ticket, nonce);
     } catch (err) {
       console.error('Failed to get WS ticket:', err);
       this.scheduleReconnect();
     }
   }
 
-  private doConnect(ticket: string): void {
-    this.ws = new WebSocket(`${WS_URL}?ticket=${ticket}`);
+  private doConnect(ticket: string, nonce: string): void {
+    this.ws = new WebSocket(websocketUrl());
 
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;
       console.log('WebSocket connected');
+      this.send({ v: 1, type: 'auth', ticket, nonce });
 
       // On reconnect, send resume with last known seq per channel
       if (this.hasConnectedBefore) {

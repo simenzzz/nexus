@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{State, WebSocketUpgrade};
+use axum::http::header::ORIGIN;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::auth::ws_ticket;
@@ -12,15 +13,33 @@ use crate::collab::resource::ResourceRef;
 use crate::collab::CollabManager;
 use crate::middleware::rate_limit::{
     check_rate_limit, collab_subscribe_key, message_send_key, watch_playback_control_key,
-    watch_queue_op_key, watch_reaction_key, whiteboard_awareness_key,
-    whiteboard_subscribe_key, whiteboard_update_key, RateLimitConfig,
+    watch_reaction_key, whiteboard_awareness_key, whiteboard_subscribe_key, whiteboard_update_key,
+    RateLimitConfig,
 };
+use crate::ws::connection_helpers::{
+    awareness_too_large as awareness_too_large_inner, check_channel_access,
+    check_watch_channel_access, check_watch_queue_rate, compute_presence_audience,
+    refresh_audience_if_stale, send_watch_not_subscribed,
+};
+
+fn awareness_too_large(value: &serde_json::Value) -> bool {
+    awareness_too_large_inner(value, MAX_AWARENESS_BYTES)
+}
 
 /// Cap on the serialized JSON size of an awareness blob. The blob is held in
 /// memory per session and broadcast to every peer, so an unbounded blob is a
-/// DoS amplification vector independent of the 30/sec rate limit. 4 KB is
-/// enough for a cursor + selection + tool color; oversize blobs are rejected.
+/// DoS amplification vector independent of the rate limit. 4 KB is enough for
+/// a cursor + selection + tool color; oversize blobs are rejected.
 const MAX_AWARENESS_BYTES: usize = 4 * 1024;
+
+/// Watch-queue title hard cap. Enforced at the connection boundary so we
+/// fail fast with a typed error instead of silently truncating in the room.
+const MAX_WATCH_TITLE_LEN: usize = 200;
+
+/// Server-side min-interval between successive heartbeats from one
+/// connection. The client claims it heartbeats every 30s; anything tighter
+/// than 2s is either a bug or a probe.
+const MIN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 use crate::ws::presence;
 use crate::ws::protocol::{ClientMessage, ServerMessage, SubscriptionLevel};
 use crate::ws::replay;
@@ -29,31 +48,62 @@ use crate::ws::sequence;
 use crate::ws::watch_types::WatchCommand;
 use crate::AppState;
 
-#[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    ticket: Option<String>,
-}
-
 pub async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
-    Query(query): Query<WsQuery>,
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Response, Response> {
-    let ticket = query.ticket.ok_or_else(|| {
-        Response::builder()
-            .status(401)
-            .body("Missing ticket".into())
-            .unwrap_or_default()
-    })?;
+    if state.config.env.is_production() {
+        let origin = headers.get(ORIGIN).and_then(|v| v.to_str().ok());
+        if origin != Some(state.config.cors_origin.as_str()) {
+            return Err(Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body("Invalid origin".into())
+                .unwrap_or_default());
+        }
+    }
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, ticket)))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
+async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    let auth = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await;
+    let (ticket, nonce) = match auth {
+        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(ClientMessage::Auth { ticket, nonce }) => (ticket, nonce),
+            _ => {
+                let _ = socket
+                    .send(Message::Text(
+                        ServerMessage::Error {
+                            message: "Expected auth message".into(),
+                        }
+                        .to_json()
+                        .into(),
+                    ))
+                    .await;
+                return;
+            }
+        },
+        _ => {
+            let _ = socket
+                .send(Message::Text(
+                    ServerMessage::Error {
+                        message: "Authentication timeout".into(),
+                    }
+                    .to_json()
+                    .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Consume ticket from URL query parameter directly (atomic GETDEL)
-    let user_id = match ws_ticket::consume_ticket(&state.redis, &ticket).await {
+    // Consume ticket atomically (GETDEL) and validate the bound nonce in
+    // constant time. Credentials arrive in the first WS frame, not the URL,
+    // so reverse-proxy access logs never see them.
+    let user_id = match ws_ticket::consume_ticket(&state.redis, &ticket, &nonce).await {
         Ok(Some(id)) => id,
         _ => {
             let _ = ws_sender
@@ -80,7 +130,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
         user_id: user_id.clone(),
         heartbeat_interval: 30000,
     };
-    if ws_sender.send(Message::Text(auth_ok.to_json().into())).await.is_err() {
+    if ws_sender
+        .send(Message::Text(auth_ok.to_json().into()))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -91,17 +145,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
     // Channel for outgoing messages (writer task reads from this)
     let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
 
+    // Snapshot whether the user already had another connection BEFORE this
+    // one registers — multi-tab users shouldn't re-broadcast "online" every
+    // time they open a new tab. The check must come before `register`.
+    let was_offline_before_register = !state.user_connections.is_online(&user_id);
+
     // Generate a unique connection ID and register
     let conn_id = uuid::Uuid::new_v4().to_string();
-    state.user_connections.register(&user_id, conn_id.clone(), out_tx.clone());
+    state
+        .user_connections
+        .register(&user_id, conn_id.clone(), out_tx.clone());
 
-    // Notify friends that user is online
-    let friend_ids = state
-        .repos
-        .social
-        .get_friend_ids(&user_id)
-        .await
-        .unwrap_or_default();
+    // Presence audience: graph-scoped union of friends + server co-members.
+    // Cached locally with a TTL so a block / unfriend / server-leave mid
+    // session takes effect within `AUDIENCE_TTL` instead of waiting for the
+    // user to reconnect — Phase 1.3 spec wants presence scoped to live graph
+    // relationships, not the snapshot taken at connect time.
+    let mut audience = compute_presence_audience(&state, &user_id).await;
+    let mut audience_fetched_at = std::time::Instant::now();
 
     let online_msg = ServerMessage::Presence {
         user_id: user_id.clone(),
@@ -109,13 +170,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
     }
     .to_json();
 
-    for friend_id in &friend_ids {
-        if state.user_connections.is_online(friend_id) {
-            state
-                .user_connections
-                .send_to_user(friend_id, online_msg.clone())
-                .await;
+    if was_offline_before_register
+        && presence::try_claim_flap_slot(&state.redis, &user_id, "online").await
+    {
+        for audience_id in &audience {
+            if state.user_connections.is_online(audience_id) {
+                state
+                    .user_connections
+                    .send_to_user(audience_id, online_msg.clone())
+                    .await;
+            }
         }
+    } else if was_offline_before_register {
+        crate::metrics::record_presence_flap_suppressed();
+        tracing::debug!(%user_id, "suppressed online broadcast — flap slot held");
     }
 
     // Spawn writer task
@@ -139,6 +207,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
     let mut heartbeat_deadline = tokio::time::Instant::now() + heartbeat_timeout;
     let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
     let mut is_idle = false;
+    // For min-interval enforcement on heartbeats.
+    let mut last_heartbeat_at: Option<std::time::Instant> = None;
 
     // Main read loop — race heartbeat + idle timeouts against incoming messages
     loop {
@@ -157,12 +227,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                 if !is_idle {
                     is_idle = true;
                     let _ = presence::set_status(&state.redis, &user_id, "idle").await;
-                    let idle_msg = ServerMessage::Presence {
-                        user_id: user_id.clone(),
-                        status: "idle".to_string(),
-                    }.to_json();
-                    for friend_id in &friend_ids {
-                        state.user_connections.send_to_user(friend_id, idle_msg.clone()).await;
+                    if presence::try_claim_flap_slot(&state.redis, &user_id, "idle").await {
+                        refresh_audience_if_stale(
+                            &state, &user_id,
+                            &mut audience, &mut audience_fetched_at,
+                        ).await;
+                        let idle_msg = ServerMessage::Presence {
+                            user_id: user_id.clone(),
+                            status: "idle".to_string(),
+                        }.to_json();
+                        for audience_id in &audience {
+                            state.user_connections.send_to_user(audience_id, idle_msg.clone()).await;
+                        }
+                    } else {
+                        crate::metrics::record_presence_flap_suppressed();
                     }
                 }
                 // Reset idle deadline to keep checking, but don't disconnect
@@ -180,34 +258,59 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
 
                 match client_msg {
                     ClientMessage::Auth { .. } => {
-                        // Already authenticated via URL ticket, ignore
+                        // Already authenticated via the first frame; ignore repeats.
                     }
                     ClientMessage::Heartbeat => {
-                        heartbeat_deadline =
-                            tokio::time::Instant::now() + heartbeat_timeout;
+                        let now = std::time::Instant::now();
+                        if let Some(prev) = last_heartbeat_at {
+                            if now.duration_since(prev) < MIN_HEARTBEAT_INTERVAL {
+                                tracing::warn!(
+                                    %user_id,
+                                    "heartbeat min-interval violated; dropping"
+                                );
+                                continue;
+                            }
+                        }
+                        last_heartbeat_at = Some(now);
+                        heartbeat_deadline = tokio::time::Instant::now() + heartbeat_timeout;
                         idle_deadline = tokio::time::Instant::now() + idle_timeout;
 
                         // Restore from idle if needed
                         if is_idle {
                             is_idle = false;
-                            let _ = presence::set_online_with_ttl(&state.redis, &user_id, 300).await;
-                            let online_msg = ServerMessage::Presence {
-                                user_id: user_id.clone(),
-                                status: "online".to_string(),
-                            }.to_json();
-                            for friend_id in &friend_ids {
-                                state.user_connections.send_to_user(friend_id, online_msg.clone()).await;
+                            let _ =
+                                presence::set_online_with_ttl(&state.redis, &user_id, 300).await;
+                            if presence::try_claim_flap_slot(&state.redis, &user_id, "online").await
+                            {
+                                refresh_audience_if_stale(
+                                    &state,
+                                    &user_id,
+                                    &mut audience,
+                                    &mut audience_fetched_at,
+                                )
+                                .await;
+                                let online_msg = ServerMessage::Presence {
+                                    user_id: user_id.clone(),
+                                    status: "online".to_string(),
+                                }
+                                .to_json();
+                                for audience_id in &audience {
+                                    state
+                                        .user_connections
+                                        .send_to_user(audience_id, online_msg.clone())
+                                        .await;
+                                }
+                            } else {
+                                crate::metrics::record_presence_flap_suppressed();
                             }
                         } else {
-                            let _ = presence::set_online_with_ttl(&state.redis, &user_id, 300).await;
+                            let _ =
+                                presence::set_online_with_ttl(&state.redis, &user_id, 300).await;
                         }
 
                         let _ = out_tx.send(ServerMessage::HeartbeatAck.to_json()).await;
                     }
-                    ClientMessage::Subscribe {
-                        channel_id,
-                        level,
-                    } => {
+                    ClientMessage::Subscribe { channel_id, level } => {
                         // Authorization: verify user is a member of the channel's server
                         if !check_channel_access(&state, &channel_id, &user_id).await {
                             let _ = out_tx
@@ -410,8 +513,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                                     sender: out_tx.clone(),
                                 })
                                 .await;
-                            subscriptions
-                                .insert(channel_id.clone(), SubscriptionLevel::Active);
+                            subscriptions.insert(channel_id.clone(), SubscriptionLevel::Active);
 
                             // Replay missed messages
                             match replay::get_missed_messages(&state.redis, &channel_id, last).await
@@ -452,11 +554,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                         }
                         let r = ResourceRef::post(post_id);
                         collab_subscriptions.insert(r.clone());
-                        if let Err(e) = state
-                            .collab
-                            .subscribe(&r, &user_id, out_tx.clone())
-                            .await
-                        {
+                        if let Err(e) = state.collab.subscribe(&r, &user_id, out_tx.clone()).await {
                             CollabManager::send_error(&out_tx, &r, "subscribe_failed", &e).await;
                         }
                     }
@@ -465,21 +563,37 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                         collab_subscriptions.remove(&r);
                         state.collab.unsubscribe(&r, &user_id).await;
                     }
-                    ClientMessage::CollabUpdate { post_id, update_b64 } => {
+                    ClientMessage::CollabUpdate {
+                        post_id,
+                        update_b64,
+                    } => {
                         let r = ResourceRef::post(post_id);
-                        if let Err(e) = state
-                            .collab
-                            .apply_update(&r, &user_id, &update_b64)
-                            .await
-                        {
+                        if let Err(e) = state.collab.apply_update(&r, &user_id, &update_b64).await {
                             CollabManager::send_error(&out_tx, &r, "update_failed", &e).await;
                         }
                     }
-                    ClientMessage::AwarenessUpdate { post_id, state: aw_state } => {
+                    ClientMessage::AwarenessUpdate {
+                        post_id,
+                        state: aw_state,
+                    } => {
                         if awareness_too_large(&aw_state) {
                             continue;
                         }
                         let r = ResourceRef::post(post_id);
+                        let rate_key = whiteboard_awareness_key(&user_id, &r.id);
+                        if check_rate_limit(
+                            &state.redis,
+                            &RateLimitConfig {
+                                key_prefix: rate_key,
+                                limit: 2,
+                                window_secs: 1,
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            continue;
+                        }
                         state.collab.update_awareness(&r, &user_id, aw_state).await;
                     }
                     ClientMessage::WhiteboardSubscribe { whiteboard_id } => {
@@ -498,11 +612,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                         }
                         let r = ResourceRef::whiteboard(whiteboard_id);
                         collab_subscriptions.insert(r.clone());
-                        if let Err(e) = state
-                            .collab
-                            .subscribe(&r, &user_id, out_tx.clone())
-                            .await
-                        {
+                        if let Err(e) = state.collab.subscribe(&r, &user_id, out_tx.clone()).await {
                             CollabManager::send_error(&out_tx, &r, "subscribe_failed", &e).await;
                         }
                     }
@@ -540,11 +650,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                             .await;
                             continue;
                         }
-                        if let Err(e) = state
-                            .collab
-                            .apply_update(&r, &user_id, &update_b64)
-                            .await
-                        {
+                        if let Err(e) = state.collab.apply_update(&r, &user_id, &update_b64).await {
                             CollabManager::send_error(&out_tx, &r, "update_failed", &e).await;
                         }
                     }
@@ -561,11 +667,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                         }
                         let r = ResourceRef::whiteboard(whiteboard_id);
                         let rate_key = whiteboard_awareness_key(&user_id, &r.id);
+                        // Awareness fan-out is amplified to every peer; cap
+                        // at 2/sec to bound broadcast bandwidth even with the
+                        // size cap, in addition to the per-frame check above.
                         if check_rate_limit(
                             &state.redis,
                             &RateLimitConfig {
                                 key_prefix: rate_key,
-                                limit: 30,
+                                limit: 2,
                                 window_secs: 1,
                             },
                         )
@@ -699,6 +808,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                             send_watch_not_subscribed(&out_tx, &channel_id).await;
                             continue;
                         }
+                        if title.chars().count() > MAX_WATCH_TITLE_LEN {
+                            let err = ServerMessage::WatchError {
+                                channel_id: channel_id.clone(),
+                                code: "TITLE_TOO_LONG".into(),
+                                message: format!("title exceeds {MAX_WATCH_TITLE_LEN} characters"),
+                            }
+                            .to_json();
+                            let _ = out_tx.send(err).await;
+                            continue;
+                        }
                         if !check_watch_queue_rate(&state, &user_id, &channel_id, &out_tx).await {
                             continue;
                         }
@@ -716,7 +835,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
                                 .await;
                         }
                     }
-                    ClientMessage::WatchQueueRemove { channel_id, item_id } => {
+                    ClientMessage::WatchQueueRemove {
+                        channel_id,
+                        item_id,
+                    } => {
                         if !watch_subscriptions.contains(&channel_id) {
                             send_watch_not_subscribed(&out_tx, &channel_id).await;
                             continue;
@@ -864,25 +986,54 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
         }
     }
 
-    // Cleanup
-    let _ = presence::set_offline(&state.redis, &user_id).await;
+    // Cleanup — unregister first so `is_online` reflects whether any *other*
+    // connection survives this disconnect (e.g. another tab).
     crate::metrics::record_ws_disconnect();
-
-    // Notify friends that user is offline
-    let offline_msg = ServerMessage::Presence {
-        user_id: user_id.clone(),
-        status: "offline".to_string(),
-    }
-    .to_json();
-    for friend_id in &friend_ids {
-        state
-            .user_connections
-            .send_to_user(friend_id, offline_msg.clone())
-            .await;
-    }
-
-    // Unregister from connection registry
     state.user_connections.unregister(&user_id, &conn_id);
+
+    // 30-second offline grace period. Phase 1.3 spec: don't flap to "offline"
+    // on a brief network blip — the user reopening their laptop within 30s
+    // should never trigger an offline → online round-trip for the whole
+    // audience. We spawn a detached task that re-checks `is_online` after
+    // the grace window; if any other connection arrived (or stayed) we skip
+    // the offline broadcast entirely.
+    if !state.user_connections.is_online(&user_id) {
+        let state_for_grace = state.clone();
+        let user_for_grace = user_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if state_for_grace.user_connections.is_online(&user_for_grace) {
+                return;
+            }
+            let _ = presence::set_offline(&state_for_grace.redis, &user_for_grace).await;
+            // Same flap slot as online/idle transitions — if the user just
+            // emitted any presence event within the lock TTL, suppress the
+            // offline echo to keep audience traffic bounded under a
+            // reconnect-loop attacker.
+            if !presence::try_claim_flap_slot(&state_for_grace.redis, &user_for_grace, "offline")
+                .await
+            {
+                crate::metrics::record_presence_flap_suppressed();
+                return;
+            }
+            // Re-resolve audience fresh: 30s have passed, the user may have
+            // joined/left servers or blocked someone before disconnecting.
+            // We want the offline event to honor the current graph, not
+            // whatever was cached at connect time.
+            let fresh_audience = compute_presence_audience(&state_for_grace, &user_for_grace).await;
+            let offline_msg = ServerMessage::Presence {
+                user_id: user_for_grace.clone(),
+                status: "offline".to_string(),
+            }
+            .to_json();
+            for audience_id in &fresh_audience {
+                state_for_grace
+                    .user_connections
+                    .send_to_user(audience_id, offline_msg.clone())
+                    .await;
+            }
+        });
+    }
 
     for channel_id in subscriptions.keys() {
         if let Some(room) = state.room_manager.get_room(channel_id).await {
@@ -915,107 +1066,4 @@ async fn handle_socket(socket: WebSocket, state: AppState, ticket: String) {
     drop(out_tx);
     let _ = writer_handle.await;
     tracing::info!(%user_id, "WebSocket client disconnected");
-}
-
-/// Cheap size guard for awareness payloads. Serializes the JSON and rejects
-/// anything over [`MAX_AWARENESS_BYTES`]. We compare the *serialized* form so
-/// the cap matches what we'd actually hold in memory and broadcast.
-fn awareness_too_large(value: &serde_json::Value) -> bool {
-    // `serde_json::to_string` allocates — for the common-case small blob
-    // this is a few hundred bytes. If it grows we can switch to a streaming
-    // writer that aborts at the cap.
-    match serde_json::to_string(value) {
-        Ok(s) => s.len() > MAX_AWARENESS_BYTES,
-        Err(_) => true, // unserializable → reject
-    }
-}
-
-/// Check if a user has access to a channel by verifying server membership.
-async fn check_channel_access(state: &AppState, channel_id: &str, user_id: &str) -> bool {
-    let channel = match state.repos.channels.find_by_id(channel_id).await {
-        Ok(Some(ch)) => ch,
-        _ => return false,
-    };
-    let server_key = channel.server.key().to_string();
-    state
-        .repos
-        .servers
-        .is_member(&server_key, user_id)
-        .await
-        .unwrap_or(false)
-}
-
-/// Symmetric "not subscribed" surface for the watch protocol — every
-/// mutating arm uses this so clients can distinguish "I dropped the message"
-/// from "the server silently ignored me." Tracing-only on the server side.
-async fn send_watch_not_subscribed(out_tx: &mpsc::Sender<String>, channel_id: &str) {
-    let _ = out_tx
-        .send(
-            ServerMessage::WatchError {
-                channel_id: channel_id.to_string(),
-                code: "not_subscribed".into(),
-                message: "Not subscribed to this watch room".into(),
-            }
-            .to_json(),
-        )
-        .await;
-}
-
-/// Apply the per-user-per-room queue-op rate limit. On rejection, surfaces a
-/// `watch_error{code:"rate_limited"}` so the optimistic client can roll its
-/// pending entry back. Returns `true` if the caller may proceed.
-async fn check_watch_queue_rate(
-    state: &AppState,
-    user_id: &str,
-    channel_id: &str,
-    out_tx: &mpsc::Sender<String>,
-) -> bool {
-    let key = watch_queue_op_key(user_id, channel_id);
-    if check_rate_limit(
-        &state.redis,
-        &RateLimitConfig {
-            key_prefix: key,
-            // 10 ops per minute is tight, matches the plan. Queue adds and
-            // votes are user-initiated and don't justify higher.
-            limit: 10,
-            window_secs: 60,
-        },
-    )
-    .await
-    .is_err()
-    {
-        let _ = out_tx
-            .send(
-                ServerMessage::WatchError {
-                    channel_id: channel_id.to_string(),
-                    code: "rate_limited".into(),
-                    message: "Queue operation rate limited".into(),
-                }
-                .to_json(),
-            )
-            .await;
-        return false;
-    }
-    true
-}
-
-/// Watch-channel-specific access check: in addition to the membership rule,
-/// the channel must be `ChannelType::Watch`. Defends against a client trying
-/// to multiplex watch protocol commands onto an unrelated channel id.
-async fn check_watch_channel_access(state: &AppState, channel_id: &str, user_id: &str) -> bool {
-    use crate::models::channel::ChannelType;
-    let channel = match state.repos.channels.find_by_id(channel_id).await {
-        Ok(Some(ch)) => ch,
-        _ => return false,
-    };
-    if channel.channel_type != ChannelType::Watch {
-        return false;
-    }
-    let server_key = channel.server.key().to_string();
-    state
-        .repos
-        .servers
-        .is_member(&server_key, user_id)
-        .await
-        .unwrap_or(false)
 }

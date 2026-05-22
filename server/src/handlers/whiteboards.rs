@@ -137,20 +137,26 @@ async fn authorize_member(repos: &Repos, channel_id: &str, user_id: &str) -> Res
         Some(c) => c,
         None => {
             tracing::debug!(channel_id = %channel_id, user_id = %user_id, "auth: channel missing");
-            return Err(AppError::Forbidden("Not authorized for this whiteboard".into()));
+            return Err(AppError::Forbidden(
+                "Not authorized for this whiteboard".into(),
+            ));
         }
     };
 
     if !matches!(channel.channel_type, ChannelType::Whiteboard) {
         tracing::debug!(channel_id = %channel_id, user_id = %user_id, "auth: wrong channel type");
-        return Err(AppError::Forbidden("Not authorized for this whiteboard".into()));
+        return Err(AppError::Forbidden(
+            "Not authorized for this whiteboard".into(),
+        ));
     }
 
     let server_key = channel.server.key().to_string();
     let is_member = repos.servers.is_member(&server_key, user_id).await?;
     if !is_member {
         tracing::debug!(channel_id = %channel_id, user_id = %user_id, "auth: non-member");
-        return Err(AppError::Forbidden("Not authorized for this whiteboard".into()));
+        return Err(AppError::Forbidden(
+            "Not authorized for this whiteboard".into(),
+        ));
     }
     Ok(())
 }
@@ -163,9 +169,8 @@ mod tests {
     use crate::models::whiteboard::{Whiteboard, WhiteboardCheckpoint};
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
-        recommendations::MockRecommendationsRepo, server::MockServerRepo,
-        social::MockSocialRepo, user::MockUserRepo, watch::MockWatchRepo,
-        whiteboard::MockWhiteboardRepo,
+        recommendations::MockRecommendationsRepo, server::MockServerRepo, social::MockSocialRepo,
+        user::MockUserRepo, watch::MockWatchRepo, whiteboard::MockWhiteboardRepo,
     };
     use std::sync::Arc;
 

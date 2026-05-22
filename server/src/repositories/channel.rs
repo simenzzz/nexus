@@ -2,8 +2,8 @@ use async_trait::async_trait;
 #[cfg(test)]
 use mockall::automock;
 use serde::Serialize;
-use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::Client;
+use surrealdb::Surreal;
 
 use crate::error::AppError;
 use crate::models::channel::{Channel, ChannelType, CreateChannel};
@@ -19,11 +19,7 @@ pub struct CreateChannelDb {
 #[cfg_attr(test, automock)]
 #[async_trait]
 pub trait ChannelRepo: Send + Sync {
-    async fn create(
-        &self,
-        input: CreateChannel,
-        server_id: &str,
-    ) -> Result<Channel, AppError>;
+    async fn create(&self, input: CreateChannel, server_id: &str) -> Result<Channel, AppError>;
     async fn find_by_id(&self, id: &str) -> Result<Option<Channel>, AppError>;
     async fn list_for_server(&self, server_id: &str) -> Result<Vec<Channel>, AppError>;
 }
@@ -40,11 +36,7 @@ impl SurrealChannelRepo {
 
 #[async_trait]
 impl ChannelRepo for SurrealChannelRepo {
-    async fn create(
-        &self,
-        input: CreateChannel,
-        server_id: &str,
-    ) -> Result<Channel, AppError> {
+    async fn create(&self, input: CreateChannel, server_id: &str) -> Result<Channel, AppError> {
         let record: Option<Channel> = self
             .db
             .create("channel")
@@ -67,7 +59,10 @@ impl ChannelRepo for SurrealChannelRepo {
         let mut result = self
             .db
             .query("SELECT * FROM channel WHERE server = $server_id")
-            .bind(("server_id", surrealdb::RecordId::from(("server", server_id))))
+            .bind((
+                "server_id",
+                surrealdb::RecordId::from(("server", server_id)),
+            ))
             .await?;
         let channels: Vec<Channel> = result.take(0)?;
         Ok(channels)

@@ -179,8 +179,8 @@ impl WhiteboardRepo for SurrealWhiteboardRepo {
                 created_at: now,
             })
             .await?;
-        let checkpoint = created
-            .ok_or_else(|| AppError::Internal("Failed to insert checkpoint".into()))?;
+        let checkpoint =
+            created.ok_or_else(|| AppError::Internal("Failed to insert checkpoint".into()))?;
 
         // Trim with a single atomic statement that keeps the newest
         // MAX_CHECKPOINTS rows and deletes the rest. The previous "SELECT

@@ -29,7 +29,10 @@ impl UserConnectionRegistry {
         self.inner
             .entry(user_id.to_string())
             .or_default()
-            .push(Connection { id: conn_id, sender });
+            .push(Connection {
+                id: conn_id,
+                sender,
+            });
     }
 
     /// Unregister a connection by ID. Called when a WS connection closes.

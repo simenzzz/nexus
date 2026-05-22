@@ -35,16 +35,20 @@ pub async fn store_refresh_token(
 }
 
 /// Atomically consume a refresh token (GETDEL) — prevents race-condition reuse.
-pub async fn consume_refresh_token(
-    redis: &Pool,
-    token: &str,
-) -> Result<Option<String>, AppError> {
+pub async fn consume_refresh_token(redis: &Pool, token: &str) -> Result<Option<String>, AppError> {
     let key = format!("refresh:{}", hash_token(token));
     let mut conn = redis.get().await?;
     let user_id: Option<String> = redis::cmd("GETDEL")
         .arg(&key)
         .query_async(&mut conn)
         .await?;
+    Ok(user_id)
+}
+
+pub async fn get_refresh_token_user(redis: &Pool, token: &str) -> Result<Option<String>, AppError> {
+    let key = format!("refresh:{}", hash_token(token));
+    let mut conn = redis.get().await?;
+    let user_id: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
     Ok(user_id)
 }
 

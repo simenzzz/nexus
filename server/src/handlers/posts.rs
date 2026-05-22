@@ -27,7 +27,9 @@ pub async fn create_draft(
 ) -> Result<Json<Value>, AppError> {
     let title = input.title.trim();
     if title.is_empty() || title.len() > 200 {
-        return Err(AppError::BadRequest("Title must be 1-200 characters".into()));
+        return Err(AppError::BadRequest(
+            "Title must be 1-200 characters".into(),
+        ));
     }
 
     let post = repos
@@ -52,10 +54,12 @@ pub async fn get_post(
     // are only visible to the author and explicitly invited collaborators.
     if !post.published {
         let author_key = post.author.key().to_string();
-        let allowed = author_key == claims.sub
-            || repos.posts.is_invited(&post_id, &claims.sub).await?;
+        let allowed =
+            author_key == claims.sub || repos.posts.is_invited(&post_id, &claims.sub).await?;
         if !allowed {
-            return Err(AppError::Forbidden("Not authorized to view this draft".into()));
+            return Err(AppError::Forbidden(
+                "Not authorized to view this draft".into(),
+            ));
         }
     }
     Ok(Json(json!({ "post": post })))
@@ -103,7 +107,9 @@ pub async fn invite_collaborator(
         ));
     }
     repos.posts.add_invite(&post_id, invitee).await?;
-    Ok(Json(json!({ "ok": true, "post_id": post_id, "user_id": invitee })))
+    Ok(Json(
+        json!({ "ok": true, "post_id": post_id, "user_id": invitee }),
+    ))
 }
 
 pub async fn publish_post(
@@ -159,9 +165,8 @@ mod tests {
     use crate::models::post::Post;
     use crate::repositories::{
         channel::MockChannelRepo, message::MockMessageRepo, post::MockPostRepo,
-        recommendations::MockRecommendationsRepo, server::MockServerRepo,
-        social::MockSocialRepo, user::MockUserRepo, watch::MockWatchRepo,
-        whiteboard::MockWhiteboardRepo,
+        recommendations::MockRecommendationsRepo, server::MockServerRepo, social::MockSocialRepo,
+        user::MockUserRepo, watch::MockWatchRepo, whiteboard::MockWhiteboardRepo,
     };
     use mockall::predicate::eq;
     use std::sync::Arc;
@@ -214,7 +219,9 @@ mod tests {
         let result = create_draft(
             State(repos(MockPostRepo::new())),
             AuthUser(claims("u1")),
-            Json(CreateDraftInput { title: "   ".into() }),
+            Json(CreateDraftInput {
+                title: "   ".into(),
+            }),
         )
         .await;
         assert!(matches!(result, Err(AppError::BadRequest(_))));
@@ -225,7 +232,9 @@ mod tests {
         let result = create_draft(
             State(repos(MockPostRepo::new())),
             AuthUser(claims("u1")),
-            Json(CreateDraftInput { title: "x".repeat(201) }),
+            Json(CreateDraftInput {
+                title: "x".repeat(201),
+            }),
         )
         .await;
         assert!(matches!(result, Err(AppError::BadRequest(_))));
@@ -242,7 +251,9 @@ mod tests {
         let response = create_draft(
             State(repos(posts)),
             AuthUser(claims("u1")),
-            Json(CreateDraftInput { title: "My first post".into() }),
+            Json(CreateDraftInput {
+                title: "My first post".into(),
+            }),
         )
         .await
         .expect("handler should succeed");
@@ -381,7 +392,9 @@ mod tests {
             State(repos(posts)),
             AuthUser(claims("not-author")),
             Path("p1".into()),
-            Json(InviteInput { user_id: "friend".into() }),
+            Json(InviteInput {
+                user_id: "friend".into(),
+            }),
         )
         .await;
         assert!(matches!(result, Err(AppError::Forbidden(_))));
@@ -398,7 +411,9 @@ mod tests {
             State(repos(posts)),
             AuthUser(claims("u1")),
             Path("p1".into()),
-            Json(InviteInput { user_id: "friend".into() }),
+            Json(InviteInput {
+                user_id: "friend".into(),
+            }),
         )
         .await;
         assert!(matches!(result, Err(AppError::BadRequest(_))));
@@ -415,7 +430,9 @@ mod tests {
             State(repos(posts)),
             AuthUser(claims("u1")),
             Path("p1".into()),
-            Json(InviteInput { user_id: "u1".into() }),
+            Json(InviteInput {
+                user_id: "u1".into(),
+            }),
         )
         .await;
         assert!(matches!(result, Err(AppError::BadRequest(_))));
@@ -434,7 +451,9 @@ mod tests {
             State(repos_with(posts, social)),
             AuthUser(claims("u1")),
             Path("p1".into()),
-            Json(InviteInput { user_id: "stranger".into() }),
+            Json(InviteInput {
+                user_id: "stranger".into(),
+            }),
         )
         .await;
         assert!(matches!(result, Err(AppError::Forbidden(_))));
@@ -460,7 +479,9 @@ mod tests {
             State(repos_with(posts, social)),
             AuthUser(claims("u1")),
             Path("p1".into()),
-            Json(InviteInput { user_id: "friend".into() }),
+            Json(InviteInput {
+                user_id: "friend".into(),
+            }),
         )
         .await
         .expect("invite should succeed");

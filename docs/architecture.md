@@ -63,7 +63,7 @@ SurrealDB serves as both document store and graph database.
 3. Server returns JWT token (HS256, configurable expiry)
 4. Client stores token and sends it as `Authorization: Bearer <token>` on all subsequent requests
 5. `AuthUser` extractor middleware validates the token on protected routes
-6. WebSocket connections authenticate via token in query parameter
+6. WebSocket connections authenticate with a short-lived ticket sent in the first WebSocket message
 
 ## WebSocket Architecture
 

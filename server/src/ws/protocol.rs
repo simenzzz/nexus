@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum ClientMessage {
     Auth {
         ticket: String,
+        nonce: String,
     },
     Subscribe {
         channel_id: String,

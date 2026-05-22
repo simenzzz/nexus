@@ -40,4 +40,3 @@ pub struct QueueItem {
     pub position: i32,
     pub created_at: Option<DateTime<Utc>>,
 }
-

@@ -2,6 +2,7 @@ pub mod awareness;
 pub mod doc;
 pub mod post_store;
 pub mod resource;
+mod tasks;
 pub mod whiteboard_store;
 
 use std::collections::HashMap;
@@ -18,9 +19,10 @@ use awareness::Awareness;
 use doc::CollabDoc;
 use post_store::PostStore;
 use resource::{
-    awareness_message, closed_message, error_message, state_message, update_message,
-    ResourceKind, ResourceRef, ResourceStore, Snapshot, DEFAULT_PERSIST_DEBOUNCE,
+    awareness_message, closed_message, error_message, state_message, update_message, ResourceKind,
+    ResourceRef, ResourceStore, Snapshot,
 };
+use tasks::{broadcast, persist_loop, sweeper_loop};
 
 /// Hard cap on concurrent subscribers per document. Roadmap §2.4.2.
 pub const MAX_COLLABORATORS: usize = 10;
@@ -35,23 +37,23 @@ pub const IDLE_TTL: Duration = Duration::from_secs(60);
 /// In-memory CRDT session. One per [`ResourceRef`] while the resource is
 /// being edited; evicted lazily on last unsubscribe and defensively by the
 /// sweeper if it goes idle.
-struct Session {
-    doc: CollabDoc,
-    awareness: Awareness,
-    subscribers: Vec<Subscriber>,
+pub(crate) struct Session {
+    pub(crate) doc: CollabDoc,
+    pub(crate) awareness: Awareness,
+    pub(crate) subscribers: Vec<Subscriber>,
     /// True when the in-memory doc has edits not yet flushed to the store.
-    dirty: bool,
+    pub(crate) dirty: bool,
     /// Timestamp of the most recent `apply_update`. Drives idle eviction.
-    last_update_at: Instant,
+    pub(crate) last_update_at: Instant,
     /// Single-flight flag: true while a debounced persist task is scheduled
     /// or running. The persist loop clears it before exiting; the next dirty
     /// edit will spawn a fresh task.
-    persist_pending: bool,
+    pub(crate) persist_pending: bool,
 }
 
-struct Subscriber {
-    user_id: String,
-    tx: mpsc::Sender<String>,
+pub(crate) struct Subscriber {
+    pub(crate) user_id: String,
+    pub(crate) tx: mpsc::Sender<String>,
 }
 
 /// Aborts a `JoinHandle` when dropped. Used so the sweeper task stops once
@@ -116,7 +118,10 @@ impl CollabManager {
         let mut stores: HashMap<ResourceKind, Arc<dyn ResourceStore>> = HashMap::new();
         stores.insert(
             ResourceKind::Post,
-            Arc::new(post_store::PostStore::with_debounce(posts, persist_debounce)),
+            Arc::new(post_store::PostStore::with_debounce(
+                posts,
+                persist_debounce,
+            )),
         );
         Self::with_stores(stores, sweep_interval, idle_ttl)
     }
@@ -246,7 +251,8 @@ impl CollabManager {
                 return Err(format!("Document exceeds {max_doc}-byte limit"));
             }
 
-            let payload = update_message(r, update_b64.to_string(), from_user.to_string()).to_json();
+            let payload =
+                update_message(r, update_b64.to_string(), from_user.to_string()).to_json();
             broadcast(&s, Some(from_user), &payload).await;
 
             s.dirty = true;
@@ -316,14 +322,8 @@ impl CollabManager {
 
     /// Helper for the WS layer: build an error ServerMessage scoped to the
     /// resource and emit it via `tx`. Falls back to silent drop on send fail.
-    pub async fn send_error(
-        tx: &mpsc::Sender<String>,
-        r: &ResourceRef,
-        code: &str,
-        message: &str,
-    ) {
-        let _ = tx
-            .try_send(error_message(r, code.to_string(), message.to_string()).to_json());
+    pub async fn send_error(tx: &mpsc::Sender<String>, r: &ResourceRef, code: &str, message: &str) {
+        let _ = tx.try_send(error_message(r, code.to_string(), message.to_string()).to_json());
     }
 
     /// Force an immediate save and clear the dirty flag. Safe to call when
@@ -354,140 +354,6 @@ impl CollabManager {
                 }
             }
         }
-    }
-}
-
-/// Debounced persistence loop. Wakes every `debounce`, flushes if dirty, and
-/// exits when there's nothing left to save (the next edit will spawn a fresh
-/// task via `apply_update`).
-///
-/// **Invariant**: this task is the sole owner of `persist_pending = true`
-/// while running. It MUST clear that flag before returning so the next
-/// dirty edit can spawn a fresh task. We use a guard struct so the flag is
-/// cleared even on panic or unexpected early return — without it, a panic
-/// would strand the flag at `true` forever and silently drop all subsequent
-/// edits.
-async fn persist_loop(
-    session: Arc<Mutex<Session>>,
-    store: Arc<dyn ResourceStore>,
-    r: ResourceRef,
-    debounce: Duration,
-) {
-    /// Cleared in `Drop` — guarantees `persist_pending` is reset under all
-    /// exit paths (normal return, panic, future cancel).
-    struct ClearPending(Arc<Mutex<Session>>);
-    impl Drop for ClearPending {
-        fn drop(&mut self) {
-            // Best-effort clear: if the lock is contended in a panic-unwind
-            // path the next dirty edit will hit `persist_pending = true` and
-            // skip spawning, but on the *next* save attempt the loop will
-            // pick up the dirty flag and persist. Worst case = one debounce
-            // window of staleness, never permanent loss.
-            if let Ok(mut s) = self.0.try_lock() {
-                s.persist_pending = false;
-            } else {
-                let s = self.0.clone();
-                tokio::spawn(async move {
-                    s.lock().await.persist_pending = false;
-                });
-            }
-        }
-    }
-    let _guard = ClearPending(session.clone());
-
-    loop {
-        tokio::time::sleep(debounce).await;
-
-        let snap = {
-            let mut s = session.lock().await;
-            if !s.dirty {
-                // Guard clears `persist_pending` on return.
-                return;
-            }
-            // Optimistically clear dirty — re-set below on save failure.
-            // Edits landing between here and save-completion will re-flip
-            // dirty to true; the loop catches them on the next iteration.
-            s.dirty = false;
-            Snapshot {
-                state_b64: s.doc.encode_state(),
-                state_vector_b64: s.doc.encode_state_vector(),
-            }
-        };
-
-        if let Err(e) = store.save(&r, snap).await {
-            tracing::warn!(resource = ?r, error = %e, "Snapshot persist failed; retrying");
-            session.lock().await.dirty = true;
-        }
-    }
-}
-
-/// Idle-eviction sweeper. Drops sessions with no subscribers that haven't
-/// seen an edit in `idle_ttl`.
-async fn sweeper_loop(
-    sessions: Arc<DashMap<ResourceRef, Arc<Mutex<Session>>>>,
-    stores: Arc<HashMap<ResourceKind, Arc<dyn ResourceStore>>>,
-    sweep_interval: Duration,
-    idle_ttl: Duration,
-) {
-    loop {
-        tokio::time::sleep(sweep_interval).await;
-        let now = Instant::now();
-        let mut to_evict: Vec<ResourceRef> = Vec::new();
-
-        for entry in sessions.iter() {
-            let key = entry.key().clone();
-            let session = entry.value().clone();
-            drop(entry);
-            let s = match session.try_lock() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-            if s.subscribers.is_empty() && now.duration_since(s.last_update_at) > idle_ttl {
-                to_evict.push(key);
-            }
-        }
-
-        for key in to_evict {
-            let Some(session) = sessions.get(&key).map(|s| s.clone()) else {
-                continue;
-            };
-            let snap = {
-                let mut s = session.lock().await;
-                if s.dirty {
-                    s.dirty = false;
-                    Some(Snapshot {
-                        state_b64: s.doc.encode_state(),
-                        state_vector_b64: s.doc.encode_state_vector(),
-                    })
-                } else {
-                    None
-                }
-            };
-            if let Some(snap) = snap {
-                let store = match stores.get(&key.kind) {
-                    Some(s) => s.clone(),
-                    None => {
-                        tracing::warn!(resource = ?key, "Sweeper: no store registered");
-                        continue;
-                    }
-                };
-                if let Err(e) = store.save(&key, snap).await {
-                    tracing::warn!(resource = ?key, error = %e, "Sweeper flush failed");
-                    session.lock().await.dirty = true;
-                    continue;
-                }
-            }
-            sessions.remove(&key);
-        }
-    }
-}
-
-async fn broadcast(session: &Session, skip_user: Option<&str>, payload: &str) {
-    for sub in &session.subscribers {
-        if matches!(skip_user, Some(u) if u == sub.user_id) {
-            continue;
-        }
-        let _ = sub.tx.try_send(payload.to_string());
     }
 }
 
@@ -722,7 +588,11 @@ mod tests {
         let mut posts = MockPostRepo::new();
         let seeded_clone = seeded.clone();
         posts.expect_find_by_id().returning(move |_| {
-            Ok(Some(fake_post_with_state("u1", false, seeded_clone.clone())))
+            Ok(Some(fake_post_with_state(
+                "u1",
+                false,
+                seeded_clone.clone(),
+            )))
         });
         posts.expect_is_invited().returning(|_, _| Ok(true));
         posts.expect_save_snapshot().returning(|_, _, _| Ok(()));
@@ -778,8 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn evicted_session_rehydrates_from_snapshot() {
-        let saved: Arc<std::sync::Mutex<String>> =
-            Arc::new(std::sync::Mutex::new(String::new()));
+        let saved: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
 
         let mut posts = MockPostRepo::new();
         let saved_for_find = saved.clone();
@@ -789,12 +658,10 @@ mod tests {
         });
         posts.expect_is_invited().returning(|_, _| Ok(true));
         let saved_for_save = saved.clone();
-        posts
-            .expect_save_snapshot()
-            .returning(move |_, state, _| {
-                *saved_for_save.lock().unwrap() = state;
-                Ok(())
-            });
+        posts.expect_save_snapshot().returning(move |_, state, _| {
+            *saved_for_save.lock().unwrap() = state;
+            Ok(())
+        });
 
         let manager = CollabManager::with_intervals(
             Arc::new(posts),
@@ -936,11 +803,7 @@ mod tests {
                 0,
             )),
         );
-        CollabManager::with_stores(
-            stores,
-            Duration::from_millis(500),
-            Duration::from_secs(60),
-        )
+        CollabManager::with_stores(stores, Duration::from_millis(500), Duration::from_secs(60))
     }
 
     #[tokio::test]

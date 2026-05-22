@@ -28,11 +28,19 @@ pub enum AppError {
 
     #[error("Rate limited")]
     RateLimited { retry_after: u64 },
+
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
 }
+
+const INTERNAL_MESSAGE: &str = "internal error";
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Log internal errors server-side before sanitizing for the client
+        // Log internal errors server-side BEFORE sanitizing for the client.
+        // The fixed user-facing message ensures no DB/Redis details leak; the
+        // request_id field lets operators correlate this response with the
+        // server-side log line.
         match &self {
             AppError::Database(msg) => tracing::error!(error = %msg, "Database error"),
             AppError::Redis(msg) => tracing::error!(error = %msg, "Redis error"),
@@ -45,10 +53,11 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into()),
-            AppError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into()),
-            AppError::Redis(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into()),
-            AppError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "Rate limited".into()),
+            AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_MESSAGE.into()),
+            AppError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_MESSAGE.into()),
+            AppError::Redis(_) => (StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_MESSAGE.into()),
+            AppError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate limited".into()),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
         };
 
         let body = serde_json::json!({ "error": message });

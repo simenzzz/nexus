@@ -48,10 +48,15 @@ pub fn validate_access_token(token: &str, secret: &str) -> Result<Claims, AppErr
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod test_fixtures {
+    // Compiled only under cfg(test) — never reaches a release binary.
+    pub const SECRET: &str = "test-secret-not-for-production-do-not-ship";
+}
 
-    const SECRET: &str = "test-secret-not-for-production";
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::SECRET;
+    use super::*;
 
     #[test]
     fn sign_and_verify_roundtrip() {

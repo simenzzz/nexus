@@ -23,7 +23,9 @@ pub async fn create_channel(
 
     let owner_key = server.owner.key().to_string();
     if owner_key != claims.sub {
-        return Err(AppError::Forbidden("Only the server owner can create channels".into()));
+        return Err(AppError::Forbidden(
+            "Only the server owner can create channels".into(),
+        ));
     }
 
     // Validate channel name
@@ -45,15 +47,16 @@ pub async fn get_channels(
     Path(server_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     // Verify user is a member of the server
-    if !state.repos.servers.is_member(&server_id, &claims.sub).await? {
+    if !state
+        .repos
+        .servers
+        .is_member(&server_id, &claims.sub)
+        .await?
+    {
         return Err(AppError::Forbidden("Not a member of this server".into()));
     }
 
-    let channels = state
-        .repos
-        .channels
-        .list_for_server(&server_id)
-        .await?;
+    let channels = state.repos.channels.list_for_server(&server_id).await?;
 
     Ok(Json(json!({ "channels": channels })))
 }
